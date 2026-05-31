@@ -45,96 +45,56 @@ function AG({value,onChange,placeholder,style={},minH=52}){
   return <textarea ref={r} className="ag" value={value||""} onChange={onChange} placeholder={placeholder} style={{minHeight:minH,...style}}/>;
 }
 
+/* ══ Firebase ══ */
+const FB={
+  _url(u){return u.replace(/\/+$/,"")+"/vpc.json";},
+  async load(u){const res=await fetch(FB._url(u));if(!res.ok)throw new Error(`불러오기 실패 (${res.status})`);return(await res.json())||{};},
+  async save(u,data){const res=await fetch(FB._url(u),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});if(!res.ok)throw new Error(`저장 실패 (${res.status})`);return await res.json();},
+  /* ★ 학생 제출: 해당 학번 키만 PATCH (PUT 전체 덮어쓰기 방지) */
+  async patchSubmission(u,stuId,data){
+    const url=u.replace(/\/+$/,"")+`/vpc/submissions/${stuId}.json`;
+    const res=await fetch(url,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+    if(!res.ok)throw new Error(`제출 저장 실패 (${res.status})`);
+    return await res.json();
+  },
+};
+const LC={
+  get:(k,d)=>{try{const v=localStorage.getItem(k);return v!=null?JSON.parse(v):d;}catch{return d;}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}},
+};
+
 /* ══ 구글 드라이브 업로드 (Apps Script 경유) ══ */
 function extractFolderId(url){
   if(!url||!url.startsWith("http"))return null;
   const m=url.match(/\/folders\/([a-zA-Z0-9_-]{20,})/);
   return m?m[1]:null;
 }
-
-/**
- * Apps Script 웹앱으로 이미지 업로드
- * @param {string} appsScriptUrl - 배포된 Apps Script 웹앱 URL
- * @param {string} base64Data    - base64 이미지 (data:... 포함 가능)
- * @param {string} rootFolderId  - 상위 폴더 ID (없으면 내 드라이브 루트)
- * @param {string} studentName   - 학생 이름 (폴더명으로 사용)
- * @param {string} studentId     - 학번
- * @param {string} fileName      - 저장할 파일명
- */
-async function uploadToDrive(appsScriptUrl, base64Data, rootFolderId, studentName, studentId, fileName){
-  if(!appsScriptUrl||!base64Data||!studentName||!fileName)return{ok:false,error:"파라미터 부족"};
+async function uploadToDrive(appsScriptUrl,base64Data,rootFolderId,studentName,studentId,fileName){
+  if(!appsScriptUrl||!base64Data||!studentName||!fileName)return{ok:false};
   try{
     const fd=new FormData();
-    if(rootFolderId) fd.append("rootFolderId",rootFolderId);
+    if(rootFolderId)fd.append("rootFolderId",rootFolderId);
     fd.append("studentName",studentName);
     fd.append("studentId",studentId||"");
     fd.append("fileName",fileName);
     fd.append("base64Data",base64Data);
     fd.append("mimeType","image/jpeg");
-    // no-cors: 응답 읽기 불가지만 업로드는 정상 처리됨
     await fetch(appsScriptUrl,{method:"POST",mode:"no-cors",body:fd});
     return{ok:true};
-  }catch(e){
-    console.warn("Drive 업로드 오류:",e.message);
-    return{ok:false,error:e.message};
-  }
+  }catch(e){console.warn("Drive 업로드 오류:",e.message);return{ok:false};}
 }
-
-/**
- * 활동 제출 시 모든 사진을 학생 이름 폴더에 업로드
- * questionPhoto(3단계) + subImgs(추가문항 수기 사진) 모두 포함
- */
-async function uploadAllPhotosForActivity({appsScriptUrl, rootUrl, driveUrls, stuId, stuName, qid, qTitle, qIdx, answers}){
-  if(!appsScriptUrl) return;
-  // rootFolderId: driveUrls[stuId] 우선, 없으면 rootUrl
-  const folderUrl = driveUrls[stuId] || rootUrl;
-  const rootFolderId = extractFolderId(folderUrl) || null;
-  const ans = answers[qid]||{};
-  const actLabel = `활동${qIdx+1}_${(qTitle||qid).replace(/[^\w가-힣]/g,"").slice(0,10)}`;
+async function uploadAllPhotosForActivity({appsScriptUrl,rootUrl,driveUrls,stuId,stuName,qid,qTitle,qIdx,answers}){
+  if(!appsScriptUrl)return;
+  const folderUrl=driveUrls[stuId]||rootUrl;
+  const rootFolderId=extractFolderId(folderUrl)||null;
+  const ans=answers[qid]||{};
+  const actLabel=`활동${qIdx+1}_${(qTitle||qid).replace(/[^\w가-힣]/g,"").slice(0,10)}`;
   const uploads=[];
-
-  // 1단계: 기본 답변 사진 (mainPhoto)
-  if(ans.mainPhoto){
-    uploads.push(uploadToDrive(
-      appsScriptUrl, ans.mainPhoto, rootFolderId,
-      stuName, stuId,
-      `${stuId}_${stuName}_${actLabel}_답변사진.jpg`
-    ));
-  }
-  // 3단계: 문항 페이지 전체 사진
-  if(ans.questionPhoto){
-    uploads.push(uploadToDrive(
-      appsScriptUrl, ans.questionPhoto, rootFolderId,
-      stuName, stuId,
-      `${stuId}_${stuName}_${actLabel}_문항전체.jpg`
-    ));
-  }
-  // 2단계: 추가문항 수기 사진들
-  if(ans.subImgs){
-    Object.entries(ans.subImgs).forEach(([si, imgData])=>{
-      if(imgData){
-        uploads.push(uploadToDrive(
-          appsScriptUrl, imgData, rootFolderId,
-          stuName, stuId,
-          `${stuId}_${stuName}_${actLabel}_추가${Number(si)+1}.jpg`
-        ));
-      }
-    });
-  }
-  if(uploads.length===0) return;
-  // 병렬 업로드 (no-cors이므로 결과 확인 불가, 낙관적 처리)
-  await Promise.allSettled(uploads);
+  if(ans.mainPhoto)uploads.push(uploadToDrive(appsScriptUrl,ans.mainPhoto,rootFolderId,stuName,stuId,`${stuId}_${stuName}_${actLabel}_답변사진.jpg`));
+  if(ans.questionPhoto)uploads.push(uploadToDrive(appsScriptUrl,ans.questionPhoto,rootFolderId,stuName,stuId,`${stuId}_${stuName}_${actLabel}_문항전체.jpg`));
+  if(ans.subImgs){Object.entries(ans.subImgs).forEach(([si,imgData])=>{if(imgData)uploads.push(uploadToDrive(appsScriptUrl,imgData,rootFolderId,stuName,stuId,`${stuId}_${stuName}_${actLabel}_추가${Number(si)+1}.jpg`));});}
+  if(uploads.length)await Promise.allSettled(uploads);
 }
-
-const FB={
-  _url(u){return u.replace(/\/+$/,"")+"/vpc.json";},
-  async load(u){const res=await fetch(FB._url(u));if(!res.ok)throw new Error(`불러오기 실패 (${res.status})`);return(await res.json())||{};},
-  async save(u,data){const res=await fetch(FB._url(u),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});if(!res.ok)throw new Error(`저장 실패 (${res.status})`);return await res.json();},
-};
-const LC={
-  get:(k,d)=>{try{const v=localStorage.getItem(k);return v!=null?JSON.parse(v):d;}catch{return d;}},
-  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}},
-};
 
 const INIT_ROSTER=[
   {no:1,id:"3105",name:"김성현"},{no:2,id:"3112",name:"박성욱"},{no:3,id:"3306",name:"김민재"},
@@ -151,10 +111,10 @@ const INIT_ROSTER=[
 ];
 const DEF_Q=[
   {id:"q1",subject:"확률과 통계",title:"🀄 조건부 확률 알아보기",maxLen:600,poemImages:[],videoUrl:"https://youtu.be/CiqWjmqDiIs?si=yelK39RiBnNT_3t4",question:"조건부 확률에 대해 알아보고, 이와 연계된 베이즈 정리의 역확률 문제에 대해 탐구해보자\n1)조건부 확률 이란?",subQuestions:["",""],placeholder:"조건부 확률이란...",rubric:["통계 해석 정확성","발표 도입부 구성","주장의 논리성","표현의 명확성"]},
-  {id:"q2",subject:"확률과 통계",title:"🤩 사람의 감정을 확률로 판단할 수 있을까? 🤩",maxLen:500,poemImages:[],videoUrl:"https://youtu.be/Y4ecU7NkiEI?si=paQVSycwaRRcYkGZ",question:"1-1) 어떤 사람이 상대방에게 호감이 있어서 초콜릿을 줄 확률은 40% 이다.\n어떤 사람이 상대방에게 호감이 없지만 \"예의상\" 초콜릿을 줄 확률은 30%이다.\n이에 대해 상황에서 사건을 설정하고 수학적 기호로 표현해보자",subQuestions:[""],placeholder:"사건을 설정하면...",rubric:["경우의 수 정확성","서사 구성력","수학과 이야기의 통합","창의성"]},
-  {id:"q3",subject:"화법과 작문",title:"🏳️‍🌈 오늘의 시 🏳️‍🌈 <즐거운 편지>에 나타난 '조건부 확률 계산하기'",maxLen:700,poemImages:[],videoUrl:"",question:"Q1) 이 시에서 찾을 수 있는 다양한 사건을 정리해 봅시다.\n사건A: 그대가 한없이 괴로움 속을 헤매인다.\n사건B: 내가 오랫동안 전해 오던 아사소함으로 그대를 부른다.",subQuestions:["","",""],placeholder:"사건을 정리하면...",rubric:["발표문 구조","통계 근거 활용","설득력","논리적 흐름"]},
+  {id:"q2",subject:"확률과 통계",title:"🤩 사람의 감정을 확률로 판단할 수 있을까? 🤩",maxLen:500,poemImages:[],videoUrl:"https://youtu.be/Y4ecU7NkiEI?si=paQVSycwaRRcYkGZ",question:"1-1) 😊 어떤 사람이 상대방에게 호감이 있어서 초콜릿을 줄 확률은 40% 이다.\n어떤 사람이 상대방에게 호감이 없지만 \"예의상\" 초콜릿을 줄 확률은 30%이다.\n이에 대해 상황에서 사건을 설정하고 수학적 기호로 표현해보자",subQuestions:[""],placeholder:"사건을 설정하면...",rubric:["경우의 수 정확성","서사 구성력","수학과 이야기의 통합","창의성"]},
+  {id:"q3",subject:"화법과 작문",title:"🏳️‍🌈 오늘의 시 🏳️‍🌈 <즐거운 편지>에 나타난 '조건부 확률 계산하기'",maxLen:700,poemImages:[],videoUrl:"",question:"Q1) 이 시에서 찾을 수 있는 다양한 사건을 정리해 봅시다. (예: 내가 그대를 생각한다.)\n사건A: 그대가 한없이 괴로움 속을 헤매인다.\n사건B: 내가 오랫동안 전해 오던 사소함으로 그대를 부른다.",subQuestions:["","",""],placeholder:"사건을 정리하면...",rubric:["발표문 구조","통계 근거 활용","설득력","논리적 흐름"]},
   {id:"q4",subject:"화법과 작문",title:"🏳️‍🌈 오늘의 시 🏳️‍🌈 <꽃>에 나타난 '나만의 조건부 확률 만들기'",maxLen:500,poemImages:[],videoUrl:"",question:"Q1)이 시에서 이름을 부르는 것의 의미는 무엇인가요?\n\nQ2)이 시에 나타난 인식의 점층적 확대 과정을 3단계로 구분해 설명해 보세요.",subQuestions:["","",""],placeholder:"이 시에서...",rubric:["베이즈 정리 적용","계산 정확성","대화 형식","개념 이해도"]},
-  {id:"q5",subject:"화법과 작문",title:"설정한 조건에 맞게 🌟 '시 재구성하기' 🌟",maxLen:500,poemImages:[],videoUrl:"",question:"1)재구성 계획하기\n- 사건 ㄱ 사건A:\n  └ 사건B:",subQuestions:["",""],placeholder:"재구성 계획은...",rubric:["평가항목"]},
+  {id:"q5",subject:"화법과 작문",title:"설정한 조건에 맞게 🌟 '시 재구성하기' 🌟 내가 설정한 조건에 따라 몇 개의 구절을 선택하여 다른 관점으로 재구성하기",maxLen:500,poemImages:[],videoUrl:"",question:"1)재구성 계획하기\n- 사건 ㄱ 사건A:\n  └ 사건B:",subQuestions:["",""],placeholder:"재구성 계획은...",rubric:["평가항목"]},
 ];
 
 async function compressImage(dataUrl,maxW=600,quality=0.7){
@@ -221,14 +181,10 @@ function FullSpinner({msg="불러오는 중..."}){
   return(<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:cv.bg}}><div style={{textAlign:"center"}}><div style={{width:44,height:44,border:`3px solid ${cv.border}`,borderTopColor:cv.lav,borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto .9rem"}}/><div style={{color:cv.muted,fontWeight:700}}>{msg}</div></div></div>);
 }
 
-const ACT_STATUS={NONE:"미제출",DONE:"제출완료",REJECTED:"재제출대기"};
-const actStatusStyle={
-  "미제출":[cv.bg,cv.muted,cv.border2],
-  "제출완료":[cv.lavLt,cv.lav,cv.lavMd],
-  "재제출대기":["#fff4ec","#c05c1a","#ffcba4"],
-};
+const actStatusStyle={"미제출":[cv.bg,cv.muted,cv.border2],"제출완료":[cv.lavLt,cv.lav,cv.lavMd],"재제출대기":["#fff4ec","#c05c1a","#ffcba4"]};
 const actStatusLabel={"미제출":"미","제출완료":"✓ 완료","재제출대기":"⚠ 재제출"};
 
+/* ════════════════════════════════════ APP ════════════════════════════════════ */
 function App(){
   const [loading,setLoading]=useState(true);
   const [page,setPage]=useState("login");
@@ -237,8 +193,7 @@ function App(){
   const [videoOpen,setVideoOpen]=useState(false);
   const [teacherPwServer,setTeacherPwServer]=useState("1234");
   const [pwInput,setPwInput]=useState("");const [pwShake,setPwShake]=useState(false);
-  const [tab,setTab]=useState("home");
-  const [sideOpen,setSideOpen]=useState(false);
+  const [tab,setTab]=useState("home");const [sideOpen,setSideOpen]=useState(false);
   const sideRef=useRef(null);const triggerRef=useRef(null);
 
   const [dbUrl,setDbUrl]=useState(()=>LC.get("fb_url",""));
@@ -249,7 +204,10 @@ function App(){
 
   const [roster,setRoster]=useState(INIT_ROSTER);
   const [questions,setQuestions]=useState(DEF_Q);
-  const [submissions,setSubmissions]=useState([]);
+  /* ★ submissions: 배열 대신 객체 { stuId: {stuId,stuName,answers,at} } */
+  const [submissionsMap,setSubmissionsMap]=useState({});
+  const submissions=Object.values(submissionsMap);
+
   const [att,setAtt]=useState({});const [attNote,setAttNote]=useState({});
   const [setkStore,setSetkStore]=useState({});
   const [teacher1,setTeacher1]=useState({name:"",subject:""});
@@ -259,8 +217,7 @@ function App(){
   const [aiEngine,setAiEngine]=useState("Claude");
   const [driveUrls,setDriveUrls]=useState({});
   const [rootUrl,setRootUrl]=useState("");
-  const [attSaved,setAttSaved]=useState(false);
-  const [driveSaved,setDriveSaved]=useState(false);
+  const [attSaved,setAttSaved]=useState(false);const [driveSaved,setDriveSaved]=useState(false);
   const [expandedQ,setExpandedQ]=useState(null);const [savedQ,setSavedQ]=useState(false);
   const [newPw,setNewPw]=useState("");
   const [seteuk,setSeteuk]=useState(null);const [generating,setGenerating]=useState(false);
@@ -270,11 +227,26 @@ function App(){
   const [setkGen,setSetkGen]=useState(false);const [setkPartGen,setSetkPartGen]=useState({});
   const [rightActIdx,setRightActIdx]=useState(null);const [charLimit,setCharLimit]=useState(500);
   const [setkDashStu,setSetkDashStu]=useState("");
-  const [ocrLoading,setOcrLoading]=useState({});const [ocrDone,setOcrDone]=useState({});const [ocrSaved,setOcrSaved]=useState({});
+  const [ocrLoading,setOcrLoading]=useState({});const [ocrDone,setOcrDone]=useState({});
   const [addModal,setAddModal]=useState(false);const [addForm,setAddForm]=useState({id:"",name:""});const [addErr,setAddErr]=useState("");
   const [submitting,setSubmitting]=useState({});
-  // ★ 드라이브 업로드 상태 (qid → 'uploading'|'done'|'none')
   const [driveUploadStatus,setDriveUploadStatus]=useState({});
+  /* ★ 학생 화면: 제출 오류 메시지 */
+  const [submitErr,setSubmitErr]=useState({});
+  /* ★ 학생 화면: 문항 버전 (폴링으로 갱신) */
+  const [qVersion,setQVersion]=useState(0);
+
+  /* ── submissions 배열↔맵 변환 헬퍼 ── */
+  const mapFromArray=(arr)=>{const m={};(arr||[]).forEach(s=>{if(s?.stuId)m[s.stuId]=s;});return m;};
+  const applySubmissions=(raw)=>{
+    if(!raw)return;
+    if(Array.isArray(raw)){setSubmissionsMap(mapFromArray(raw));return;}
+    if(typeof raw==="object"){
+      // Firebase patchSubmission 구조: {stuId: {...}} 또는 배열
+      const vals=Object.values(raw).filter(v=>v&&typeof v==="object"&&v.stuId);
+      if(vals.length)setSubmissionsMap(mapFromArray(vals));
+    }
+  };
 
   const localFallback=()=>({roster:LC.get("lc_roster",INIT_ROSTER),questions:LC.get("lc_questions",DEF_Q),submissions:LC.get("lc_submissions",[]),att:LC.get("lc_att",{}),attNote:LC.get("lc_attNote",{}),setkStore:LC.get("lc_setkStore",{}),teacher1:LC.get("lc_teacher1",{name:"",subject:""}),teacher2:LC.get("lc_teacher2",{name:"",subject:"",enabled:false}),globalPrompts:LC.get("lc_globalPrompts",DEF_Q.map(q=>({id:q.id,text:""}))),apiKeys:LC.get("lc_apiKeys",{claude:"",gemini:"",openai:""}),aiEngine:LC.get("lc_aiEngine","Claude"),teacherPw:LC.get("lc_teacherPw","1234"),driveUrls:LC.get("lc_driveUrls",{}),rootUrl:LC.get("lc_rootUrl",""),appsScriptUrl:LC.get("apps_script_url","")});
 
@@ -282,7 +254,7 @@ function App(){
     if(!d)return;
     if(d.roster)setRoster(Array.isArray(d.roster)?d.roster:INIT_ROSTER);
     if(d.questions)setQuestions((Array.isArray(d.questions)&&d.questions.length>0?d.questions:DEF_Q).map(migrateQ));
-    if(d.submissions)setSubmissions(Array.isArray(d.submissions)?d.submissions:[]);
+    if(d.submissions!=null)applySubmissions(d.submissions);
     if(d.att)setAtt(d.att||{});if(d.attNote)setAttNote(d.attNote||{});
     if(d.setkStore)setSetkStore(d.setkStore||{});
     if(d.teacher1)setTeacher1(d.teacher1);if(d.teacher2)setTeacher2(d.teacher2);
@@ -311,27 +283,42 @@ function App(){
 
   useEffect(()=>{setSetkExtras(prev=>questions.map((_,i)=>prev[i]||mkAct()));},[questions.length]);
   useEffect(()=>{if(loading)return;LC.set("lc_questions",questions);},[questions]);
+  useEffect(()=>{if(loading)return;LC.set("lc_submissions",submissions);},[submissions]);
 
+  /* ── 교사: 15초 자동 동기화 (submissions만 폴링) ── */
   useEffect(()=>{
     if(!dbEnabled||loading||page!=="teacher")return;
     const iv=setInterval(async()=>{
-      try{const d=await FB.load(dbUrl);if(d.submissions)setSubmissions(Array.isArray(d.submissions)?d.submissions:[]);}
-      catch{}
+      try{
+        const d=await FB.load(dbUrl);
+        if(d.submissions)applySubmissions(d.submissions);
+      }catch{}
     },15000);
     return()=>clearInterval(iv);
   },[dbEnabled,dbUrl,loading,page]);
 
+  /* ── ★ 학생: 8초마다 questions + 반려상태 폴링 ── */
   useEffect(()=>{
     if(!dbEnabled||loading||page!=="worksheet"||!stuId)return;
     const iv=setInterval(async()=>{
       try{
         const d=await FB.load(dbUrl);
+        /* 문항 변경 감지 */
+        if(d.questions&&Array.isArray(d.questions)&&d.questions.length>0){
+          const incoming=JSON.stringify(d.questions.map(q=>({id:q.id,title:q.title,question:q.question,maxLen:q.maxLen})));
+          const current=JSON.stringify(questions.map(q=>({id:q.id,title:q.title,question:q.question,maxLen:q.maxLen})));
+          if(incoming!==current){setQuestions(d.questions.map(migrateQ));setQVersion(v=>v+1);}
+        }
+        /* 반려 감지 */
         if(d.submissions){
-          const mySub=(d.submissions||[]).find(s=>s.stuId===stuId);
+          const raw=d.submissions;
+          let mySub=null;
+          if(Array.isArray(raw))mySub=raw.find(s=>s.stuId===stuId);
+          else if(typeof raw==="object")mySub=raw[stuId];
           if(mySub){
             setAnswers(prev=>{
               let changed=false;const upd={...prev};
-              questions.forEach(q=>{
+              (d.questions||questions).forEach(q=>{
                 const srv=mySub.answers?.[q.id];
                 if(srv?.status==="재제출대기"&&prev[q.id]?.status!=="재제출대기"){
                   upd[q.id]={...(prev[q.id]||{}),status:"재제출대기",rejectionNote:srv.rejectionNote||""};
@@ -343,11 +330,11 @@ function App(){
           }
         }
       }catch{}
-    },15000);
+    },8000);
     return()=>clearInterval(iv);
-  },[dbEnabled,dbUrl,loading,page,stuId,questions]);
+  },[dbEnabled,dbUrl,loading,page,stuId]);
 
-  const snapshot=useCallback((overrides={})=>({roster,questions,submissions,att,attNote,setkStore,teacher1,teacher2,globalPrompts,apiKeys,aiEngine,teacherPw:teacherPwServer,driveUrls,rootUrl,appsScriptUrl,...overrides}),[roster,questions,submissions,att,attNote,setkStore,teacher1,teacher2,globalPrompts,apiKeys,aiEngine,teacherPwServer,driveUrls,rootUrl,appsScriptUrl]);
+  const snapshot=useCallback((overrides={})=>({roster,questions,submissions:Object.values(submissionsMap),att,attNote,setkStore,teacher1,teacher2,globalPrompts,apiKeys,aiEngine,teacherPw:teacherPwServer,driveUrls,rootUrl,appsScriptUrl,...overrides}),[roster,questions,submissionsMap,att,attNote,setkStore,teacher1,teacher2,globalPrompts,apiKeys,aiEngine,teacherPwServer,driveUrls,rootUrl,appsScriptUrl]);
 
   const pushToServer=useCallback(async(patch={})=>{
     const data={...snapshot(),...patch};
@@ -361,6 +348,21 @@ function App(){
       catch(e){setSyncMsg("⚠ "+e.message);setTimeout(()=>setSyncMsg(""),5000);throw e;}
     }
   },[snapshot,dbEnabled,dbUrl]);
+
+  /* ★ 학생 제출 전용 저장 — stuId 키로만 PATCH */
+  const pushSubmissionToServer=useCallback(async(stuId,subData)=>{
+    // 로컬 저장
+    LC.set("lc_submissions",Object.values({...submissionsMap,[stuId]:subData}));
+    if(!dbEnabled)return true;
+    try{
+      // patchSubmission: vpc/submissions/{stuId}.json PUT
+      await FB.patchSubmission(dbUrl,stuId,subData);
+      return true;
+    }catch(e){
+      console.error("제출 저장 실패:",e.message);
+      return false;
+    }
+  },[submissionsMap,dbEnabled,dbUrl]);
 
   const syncFromServer=async()=>{
     if(!dbEnabled){alert("Firebase URL을 먼저 입력하세요.");return;}
@@ -405,15 +407,9 @@ function App(){
     setDriveUrls(n);await pushToServer({driveUrls:n});alert("자동 연결 완료");
   };
 
-  const getActStatus=(sid,qid)=>{
-    const sub=submissions.find(s=>s.stuId===sid);
-    return sub?.answers?.[qid]?.status||"미제출";
-  };
-  const isActSubmitted=(sid,qid)=>["제출완료","재제출대기"].includes(getActStatus(sid,qid));
-
+  const getActStatus=(sid,qid)=>{const sub=submissionsMap[sid];return sub?.answers?.[qid]?.status||"미제출";};
   const getStatus=s=>{
-    const sub=submissions.find(x=>x.stuId===s.id);
-    if(!sub)return"none";
+    const sub=submissionsMap[s.id];if(!sub)return"none";
     const statuses=questions.map(q=>sub.answers?.[q.id]?.status||"미제출");
     if(statuses.every(st=>st==="제출완료"))return"complete";
     if(statuses.some(st=>st==="재제출대기"))return"rejected";
@@ -427,7 +423,7 @@ function App(){
     if(!/^\d{4}$/.test(stuId.trim())){setStuErr("4자리 학번 입력");return;}
     if(!stuName.trim()){setStuErr("성명 입력");return;}
     if(!roster.find(r=>r.id===stuId.trim()&&r.name===stuName.trim())){setStuErr("학번 또는 성명 불일치");return;}
-    const ex=submissions.find(s=>s.stuId===stuId.trim());if(ex)setAnswers(ex.answers||{});
+    const ex=submissionsMap[stuId.trim()];if(ex)setAnswers(ex.answers||{});
     setStuErr("");setPage("worksheet");setCurQ(0);
   };
   const handleNumpad=n=>{
@@ -435,49 +431,47 @@ function App(){
     if(next.length===teacherPwServer.length){setTimeout(()=>{if(next===teacherPwServer){setPage("teacher");setPwInput("");}else{setPwShake(true);setTimeout(()=>{setPwShake(false);setPwInput("");},600);}},150);}
   };
 
-  /* ── ★ 활동별 개별 제출 + 드라이브 업로드 ── */
+  /* ── ★ 활동별 제출 (실패 시 재시도 안내) ── */
   const submitActivity=async(qid)=>{
     const curAns=answers[qid]||{};
     setSubmitting(p=>({...p,[qid]:true}));
+    setSubmitErr(p=>({...p,[qid]:""}));
     const now=new Date().toLocaleString("ko-KR");
     const updAnswers={...answers,[qid]:{...curAns,status:"제출완료",submittedAt:now,rejectionNote:""}};
     setAnswers(updAnswers);
-    const idx=submissions.findIndex(s=>s.stuId===stuId);
-    const newData={stuId,stuName,answers:updAnswers,at:idx>=0?submissions[idx].at:now};
-    const ns=idx>=0?[...submissions.slice(0,idx),newData,...submissions.slice(idx+1)]:[...submissions,newData];
-    setSubmissions(ns);
-    try{await pushToServer({submissions:ns});}catch{}
+    const existing=submissionsMap[stuId];
+    const newData={stuId,stuName,answers:updAnswers,at:existing?.at||now};
+    setSubmissionsMap(p=>({...p,[stuId]:newData}));
 
-    // ★ 드라이브 업로드 (questionPhoto + subImgs 전체)
-    if(appsScriptUrl){
-      const hasPhotos=curAns.questionPhoto||(curAns.subImgs&&Object.values(curAns.subImgs).some(v=>v));
-      if(hasPhotos){
-        const qIdx=questions.findIndex(q=>q.id===qid);
-        const qTitle=questions[qIdx]?.title||qid;
-        setDriveUploadStatus(p=>({...p,[qid]:"uploading"}));
-        uploadAllPhotosForActivity({
-          appsScriptUrl,rootUrl,driveUrls,
-          stuId,stuName,
-          qid,qTitle,qIdx,
-          answers:updAnswers,
-        }).then(()=>{
-          setDriveUploadStatus(p=>({...p,[qid]:"done"}));
-          // 3초 후 초기화
-          setTimeout(()=>setDriveUploadStatus(p=>({...p,[qid]:"none"})),3000);
-        });
-      }
+    const ok=await pushSubmissionToServer(stuId,newData);
+    if(!ok){
+      setSubmitErr(p=>({...p,[qid]:"⚠ 서버 저장에 실패했습니다. 인터넷 연결을 확인하고 다시 제출해주세요."}));
+      // 제출 상태 롤백
+      setAnswers(prev=>({...prev,[qid]:{...prev[qid],status:"미제출"}}));
+      setSubmissionsMap(p=>{const n={...p};if(existing)n[stuId]=existing;else delete n[stuId];return n;});
+      setSubmitting(p=>({...p,[qid]:false}));
+      return;
     }
 
+    // 드라이브 업로드
+    if(appsScriptUrl){
+      const hasPhotos=curAns.mainPhoto||curAns.questionPhoto||(curAns.subImgs&&Object.values(curAns.subImgs).some(v=>v));
+      if(hasPhotos){
+        const qIdx=questions.findIndex(q=>q.id===qid);
+        setDriveUploadStatus(p=>({...p,[qid]:"uploading"}));
+        uploadAllPhotosForActivity({appsScriptUrl,rootUrl,driveUrls,stuId,stuName,qid,qTitle:questions[qIdx]?.title||qid,qIdx,answers:updAnswers})
+          .then(()=>{setDriveUploadStatus(p=>({...p,[qid]:"done"}));setTimeout(()=>setDriveUploadStatus(p=>({...p,[qid]:"none"})),3000);});
+      }
+    }
     setSubmitting(p=>({...p,[qid]:false}));
   };
 
   const rejectActivity=async(sid,qid)=>{
     const note=prompt("반려 사유를 입력하세요 (선택사항):")||"";
-    const ns=submissions.map(s=>{
-      if(s.stuId!==sid)return s;
-      return{...s,answers:{...(s.answers||{}),[qid]:{...(s.answers?.[qid]||{}),status:"재제출대기",rejectionNote:note,rejectedAt:new Date().toLocaleString("ko-KR")}}};
-    });
-    setSubmissions(ns);await pushToServer({submissions:ns});
+    const sub=submissionsMap[sid];if(!sub)return;
+    const updated={...sub,answers:{...(sub.answers||{}),[qid]:{...(sub.answers?.[qid]||{}),status:"재제출대기",rejectionNote:note,rejectedAt:new Date().toLocaleString("ko-KR")}}};
+    setSubmissionsMap(p=>({...p,[sid]:updated}));
+    await pushSubmissionToServer(sid,updated);
   };
 
   const ensureKey=()=>{
@@ -497,8 +491,8 @@ function App(){
 
   const t1Lbl=teacher1.name?`${teacher1.name} 교사(${teacher1.subject||"담당"})의 관찰`:"교사 1 관찰";
   const t2Lbl=teacher2.enabled&&teacher2.name?`${teacher2.name} 교사(${teacher2.subject||"담당"})의 관찰`:"교사 2 관찰";
-  const getSetkSub=()=>submissions.find(s=>s.stuId===setkStu)||null;
-  const onSetkStuChange=id=>{setSetkStu(id);setSetkPartResult({});setSetkResult(null);setRightActIdx(null);if(!id)return;const sub=submissions.find(s=>s.stuId===id);if(!sub)return;setSetkExtras(prev=>prev.map((act,i)=>({...act,content:sub.answers[questions[i]?.id]?.text||""})));};
+  const getSetkSub=()=>submissionsMap[setkStu]||null;
+  const onSetkStuChange=id=>{setSetkStu(id);setSetkPartResult({});setSetkResult(null);setRightActIdx(null);if(!id)return;const sub=submissionsMap[id];if(!sub)return;setSetkExtras(prev=>prev.map((act,i)=>({...act,content:sub.answers[questions[i]?.id]?.text||""})));};
   const generateActSetk=async(ai)=>{
     const keys=ensureKey();if(!keys)return;
     const ext=setkExtras[ai],q=questions[ai],stu=roster.find(s=>s.id===setkStu);
@@ -522,12 +516,19 @@ function App(){
       if(setkStu){const ns={...setkStore,[setkStu]:{...(setkStore[setkStu]||{}),final:text}};setSetkStore(ns);await pushToServer({setkStore:ns});}
     }catch(e){setSetkResult("오류: "+e.message);}setSetkGen(false);
   };
-  const runOCR=async(qIdx,imgData,subIdx=null)=>{
-    const keys={...apiKeys};if(!keys.openai){const k=prompt("OpenAI API 키(OCR)");if(!k)return;const nk={...keys,openai:k};setApiKeys(nk);pushToServer({apiKeys:nk});}
-    const qid=questions[qIdx]?.id,ok=subIdx!=null?`${qid}_sub${subIdx}`:qid;
-    setOcrLoading(p=>({...p,[ok]:true}));setOcrDone(p=>({...p,[ok]:false}));setOcrSaved(p=>({...p,[ok]:false}));
-    try{const text=await runOCRApi(imgData,{...apiKeys});if(subIdx!=null)setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgTexts:{...((p[qid]||{}).subImgTexts||{}),[subIdx]:text}}}));else setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),imgText:text}}));setOcrDone(p=>({...p,[ok]:true}));}
-    catch(e){alert("OCR 오류: "+e.message);}setOcrLoading(p=>({...p,[ok]:false}));
+  const runOCR=async(qIdx,imgData,target)=>{
+    const keys={...apiKeys};
+    if(!keys.openai){const k=prompt("OpenAI API 키(OCR)");if(!k)return;const nk={...keys,openai:k};setApiKeys(nk);pushToServer({apiKeys:nk});}
+    const qid=questions[qIdx]?.id;
+    const ok=`${qid}_${target}`;
+    setOcrLoading(p=>({...p,[ok]:true}));setOcrDone(p=>({...p,[ok]:false}));
+    try{
+      const text=await runOCRApi(imgData,{...apiKeys});
+      if(target==="main")setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),text}}));
+      else if(typeof target==="number")setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgTexts:{...((p[qid]||{}).subImgTexts||{}),[target]:text}}}));
+      setOcrDone(p=>({...p,[ok]:true}));
+    }catch(e){alert("OCR 오류: "+e.message);}
+    setOcrLoading(p=>({...p,[ok]:false}));
   };
   const exportAttCsv=()=>{
     const hdr=["연번","학번","이름",...PERIODS.map(p=>p+"교시"),"비고"];
@@ -541,8 +542,7 @@ function App(){
     const csv="﻿"+[["학생별 세특"],hdr,...rows].map(r=>r.map(v=>'"'+String(v||"").replace(/"/g,'""')+'"').join(",")).join("\r\n");
     const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="학생별세특.csv";a.click();
   };
-
-  const reset=()=>{setPage("login");setStuId("");setStuName("");setStuErr("");setAnswers({});setCurQ(0);setSubmitted(null);setSeteuk(null);setTNote("");setOcrDone({});setOcrSaved({});setVideoOpen(false);setDriveUploadStatus({});};
+  const reset=()=>{setPage("login");setStuId("");setStuName("");setStuErr("");setAnswers({});setCurQ(0);setSubmitted(null);setSeteuk(null);setTNote("");setOcrDone({});setVideoOpen(false);setDriveUploadStatus({});setSubmitErr({});};
 
   const allActivitiesSubmitted=questions.every(q=>answers[q.id]?.status==="제출완료");
   const submittedCount=questions.filter(q=>answers[q.id]?.status==="제출완료").length;
@@ -693,19 +693,20 @@ function App(){
                   <button onClick={async()=>{setDriveSaved(true);setTimeout(()=>setDriveSaved(false),2000);await pushToServer({driveUrls,rootUrl});}} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".76rem",padding:".32rem .75rem"}}>💾 저장</button>
                 </div>
               </div>
+              {/* ★ 제출된 사진 미리보기 모달 */}
               <div style={{overflowX:"auto",borderRadius:11,border:`1.5px solid ${cv.border}`}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:".81rem",minWidth:700}}>
                   <thead><tr style={{background:"linear-gradient(90deg,#e8e0ff,#d4f5e8)"}}>
                     <th style={{padding:".55rem .5rem",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,width:30}}>번</th>
                     <th style={{padding:".55rem .5rem",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,width:54}}>학번</th>
                     <th style={{padding:".55rem .7rem",textAlign:"left",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2}}>이름</th>
-                    {questions.map((_,i)=>(<th key={i} style={{padding:".55rem .3rem",textAlign:"center",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,minWidth:90}}>활동{i+1}</th>))}
+                    {questions.map((_,i)=>(<th key={i} style={{padding:".55rem .3rem",textAlign:"center",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,minWidth:100}}>활동{i+1}</th>))}
                     <th style={{padding:".55rem .4rem",textAlign:"center",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,width:90}}>📂 폴더</th>
                     <th style={{padding:".55rem .7rem",textAlign:"center",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,width:90}}>종합</th>
                     <th style={{padding:".55rem .4rem",textAlign:"center",borderBottom:`2px solid ${cv.border}`,fontWeight:700,color:cv.ink2,width:55}}>열람</th>
                   </tr></thead>
                   <tbody>{roster.map(s=>{
-                    const st=getStatus(s);const[sbg,,sbc]=stC[st];const sub=submissions.find(x=>x.stuId===s.id);
+                    const st=getStatus(s);const[sbg,,sbc]=stC[st];const sub=submissionsMap[s.id];
                     return(<tr key={s.id} style={{background:st==="complete"?"#f2fff8":st==="rejected"?"#fff8f0":st==="none"?"#fff8f8":"#fff"}}>
                       <td style={{padding:".4rem .5rem",textAlign:"center",borderBottom:`1px solid ${cv.border}`,color:cv.muted,fontSize:".76rem"}}>{s.no}</td>
                       <td style={{padding:".4rem .5rem",textAlign:"center",borderBottom:`1px solid ${cv.border}`,fontFamily:"monospace",fontWeight:700,fontSize:".78rem"}}>{s.id}</td>
@@ -713,15 +714,22 @@ function App(){
                       {questions.map((q,qi)=>{
                         const actSt=getActStatus(s.id,q.id);
                         const [abg,acol,abc]=actStatusStyle[actSt]||actStatusStyle["미제출"];
+                        const ansData=sub?.answers?.[q.id];
+                        const hasPhotos=ansData&&(ansData.mainPhoto||ansData.questionPhoto||(ansData.subImgs&&Object.values(ansData.subImgs).some(v=>v)));
                         return(<td key={qi} style={{padding:".35rem .3rem",textAlign:"center",borderBottom:`1px solid ${cv.border}`}}>
                           <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:".2rem"}}>
                             <span style={pill(abg,acol,abc)}>{actStatusLabel[actSt]||"미"}</span>
-                            {actSt==="제출완료"&&(
-                              <button onClick={()=>rejectActivity(s.id,q.id)} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".62rem",padding:".1rem .4rem",borderRadius:5}}>반려</button>
-                            )}
-                            {actSt==="재제출대기"&&sub?.answers?.[q.id]?.rejectionNote&&(
-                              <span style={{fontSize:".62rem",color:"#c05c1a",maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={sub.answers[q.id].rejectionNote}>{sub.answers[q.id].rejectionNote.slice(0,8)}…</span>
-                            )}
+                            {/* ★ 사진 있으면 미리보기 버튼 */}
+                            {hasPhotos&&<button onClick={()=>{
+                              const imgs=[];
+                              if(ansData.mainPhoto)imgs.push({label:"답변사진",src:ansData.mainPhoto});
+                              if(ansData.questionPhoto)imgs.push({label:"문항전체",src:ansData.questionPhoto});
+                              Object.entries(ansData.subImgs||{}).forEach(([si,src])=>{if(src)imgs.push({label:`추가${Number(si)+1}`,src});});
+                              const win=window.open("","_blank","width=700,height=600");
+                              win.document.write(`<html><body style="background:#1a1a2e;padding:1rem;font-family:sans-serif">${imgs.map(im=>`<div style="margin-bottom:1.5rem"><div style="color:#c5b8f5;font-weight:700;margin-bottom:.4rem">${im.label}</div><img src="${im.src}" style="max-width:100%;border-radius:8px;display:block"/></div>`).join("")}</body></html>`);
+                            }} style={{...btn(cv.lavLt,cv.lav),border:`1px solid ${cv.lavMd}`,fontSize:".62rem",padding:".12rem .45rem",borderRadius:5}}>📷 사진보기</button>}
+                            {actSt==="제출완료"&&(<button onClick={()=>rejectActivity(s.id,q.id)} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".62rem",padding:".1rem .4rem",borderRadius:5}}>반려</button>)}
+                            {actSt==="재제출대기"&&sub?.answers?.[q.id]?.rejectionNote&&(<span style={{fontSize:".62rem",color:"#c05c1a",maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={sub.answers[q.id].rejectionNote}>{sub.answers[q.id].rejectionNote.slice(0,8)}…</span>)}
                           </div>
                         </td>);
                       })}
@@ -745,9 +753,13 @@ function App(){
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.2rem",flexWrap:"wrap",gap:".6rem"}}>
                   <div style={{fontWeight:800,fontSize:"1.25rem",color:cv.ink}}>✏️ 문항설정</div>
                   <div style={{display:"flex",alignItems:"center",gap:".6rem"}}>
-                    <span style={{fontSize:".76rem",color:savedQ?cv.mint:cv.muted,fontWeight:savedQ?700:400}}>{savedQ?"✓ 저장됨 (학생 화면에 반영됨)":""}</span>
-                    <button onClick={async()=>{setSavedQ(true);setTimeout(()=>setSavedQ(false),2500);await pushToServer({questions});}} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".78rem",padding:".38rem .9rem"}}>💾 문항 저장 → 학생 화면 반영</button>
+                    <span style={{fontSize:".76rem",color:savedQ?cv.mint:cv.muted,fontWeight:savedQ?700:400}}>{savedQ?"✓ 저장됨 — 학생이 새로고침 없이 8초 내 자동 반영됩니다":""}</span>
+                    <button onClick={async()=>{setSavedQ(true);setTimeout(()=>setSavedQ(false),4000);await pushToServer({questions});}} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".78rem",padding:".38rem .9rem"}}>💾 전체 저장 → 학생 화면 자동 반영</button>
                   </div>
+                </div>
+                {/* ★ 안내 배너 */}
+                <div style={{background:"#fffdf0",border:`1.5px solid ${cv.peachMd}`,borderRadius:10,padding:".7rem 1rem",marginBottom:"1.1rem",fontSize:".8rem",color:cv.peachDk,lineHeight:1.7}}>
+                  💡 저장 후 학생 화면에 <strong>8초 이내</strong> 자동 반영됩니다. 학생이 새로고침할 필요 없습니다.
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:".9rem"}}>
                   {qs.map((q,idx)=>(<div key={q.id} style={crd()}>
@@ -853,50 +865,33 @@ function App(){
 
             {tab==="settings"&&(<>
               <div style={{fontWeight:800,fontSize:"1.25rem",marginBottom:"1.2rem",color:cv.ink}}>⚙️ 환경설정</div>
-
-              {/* ★ Apps Script 드라이브 연동 설정 */}
               <div style={{...crd({background:appsScriptUrl?"#edfff6":cv.peachLt,border:`2px solid ${appsScriptUrl?cv.mintMd:cv.peachMd}`}),marginBottom:"1.2rem"}}>
                 <div style={{display:"flex",alignItems:"center",gap:".55rem",marginBottom:".55rem"}}>
                   <span style={{fontWeight:800,fontSize:"1rem",color:cv.ink}}>📸 구글 드라이브 사진 자동 업로드</span>
                   <span style={{...pill(appsScriptUrl?cv.mintLt:cv.peachLt,appsScriptUrl?cv.mint:cv.peachDk,appsScriptUrl?cv.mintMd:cv.peachMd),fontSize:".7rem"}}>{appsScriptUrl?"✅ 연결됨":"미설정"}</span>
                 </div>
                 <div style={{fontSize:".83rem",lineHeight:1.85,marginBottom:"1rem",background:"rgba(255,255,255,.85)",padding:".85rem 1rem",borderRadius:9,border:`1px solid ${appsScriptUrl?cv.mintMd:cv.peachMd}`}}>
-                  <strong>설정 방법:</strong><br/>
                   1. <a href="https://script.google.com" target="_blank" rel="noreferrer" style={{color:cv.lav,fontWeight:700}}>script.google.com</a> → 새 프로젝트<br/>
-                  2. 위 <strong>Apps Script 코드</strong> 전체 붙여넣기<br/>
-                  3. <strong>배포 → 새 배포 → 웹 앱</strong><br/>
-                  &nbsp;&nbsp;&nbsp;실행 계정: <strong>나</strong> · 액세스: <strong>모든 사용자(익명 포함)</strong><br/>
+                  2. Apps Script 코드 전체 붙여넣기<br/>
+                  3. <strong>배포 → 새 배포 → 웹 앱</strong> (실행: 나 / 액세스: 모든 사용자)<br/>
                   4. 배포 URL 복사 → 아래 붙여넣기
                 </div>
-                <div style={{marginBottom:".85rem"}}>
-                  <div style={{fontSize:".8rem",fontWeight:700,color:cv.ink2,marginBottom:".3rem"}}>Apps Script 웹앱 URL</div>
-                  <input style={{...inp(),fontFamily:"monospace",fontSize:".83rem"}} placeholder="https://script.google.com/macros/s/.../exec" value={appsScriptUrl} onChange={e=>{const v=e.target.value.trim();setAppsScriptUrl(v);LC.set("apps_script_url",v);}}/>
-                </div>
-                <div style={{fontSize:".78rem",color:cv.ink2,lineHeight:1.75,background:"rgba(255,255,255,.75)",padding:".65rem .9rem",borderRadius:8,border:`1px solid ${appsScriptUrl?cv.mintMd:cv.peachMd}`}}>
-                  <strong>업로드 동작:</strong> 학생이 활동을 제출하면 자동으로<br/>
-                  📂 상위폴더 → <strong>학생 이름 폴더</strong> → 사진 저장<br/>
-                  · 3단계 문항 페이지 사진 (<code>학번_이름_활동N_문항전체.jpg</code>)<br/>
-                  · 2단계 추가문항 수기 사진 (<code>학번_이름_활동N_추가N.jpg</code>)
-                </div>
-                <div style={{display:"flex",gap:".6rem",marginTop:".9rem",flexWrap:"wrap"}}>
-                  <button onClick={async()=>{await pushToServer({appsScriptUrl});alert("✅ 저장 완료");}} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),fontSize:".84rem",padding:".5rem 1.1rem"}}>💾 저장</button>
-                  {appsScriptUrl&&<button onClick={()=>{if(window.confirm("Apps Script URL을 초기화할까요?")){{setAppsScriptUrl("");LC.set("apps_script_url","");pushToServer({appsScriptUrl:""});}}}}>초기화</button>}
-                </div>
+                <div style={{marginBottom:".85rem"}}><div style={{fontSize:".8rem",fontWeight:700,color:cv.ink2,marginBottom:".3rem"}}>Apps Script 웹앱 URL</div><input style={{...inp(),fontFamily:"monospace",fontSize:".83rem"}} placeholder="https://script.google.com/macros/s/.../exec" value={appsScriptUrl} onChange={e=>{const v=e.target.value.trim();setAppsScriptUrl(v);LC.set("apps_script_url",v);}}/></div>
+                <button onClick={async()=>{await pushToServer({appsScriptUrl});alert("✅ 저장 완료");}} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),fontSize:".84rem",padding:".5rem 1.1rem"}}>💾 저장</button>
               </div>
-
               <div style={{...crd({background:dbEnabled?cv.mintLt:cv.peachLt,border:`2px solid ${dbEnabled?cv.mintMd:cv.peachMd}`}),marginBottom:"1.2rem"}}>
-                <div style={{fontWeight:800,marginBottom:".6rem",fontSize:"1rem",color:cv.ink}}>🔥 Firebase 서버 설정 <span style={{...pill(cv.mintLt,cv.mint,cv.mintMd),fontSize:".7rem",marginLeft:".4rem"}}>무료 · API Key 불필요</span></div>
+                <div style={{fontWeight:800,marginBottom:".6rem",fontSize:"1rem",color:cv.ink}}>🔥 Firebase 서버 설정</div>
                 <div style={{fontSize:".83rem",lineHeight:1.9,marginBottom:"1rem",background:"rgba(255,255,255,.9)",padding:".85rem 1rem",borderRadius:9,border:`1px solid ${cv.mintMd}`}}>
                   1. <a href="https://console.firebase.google.com" target="_blank" rel="noreferrer" style={{color:cv.lav,fontWeight:700}}>console.firebase.google.com</a> → Google 계정 로그인<br/>
-                  2. <strong>프로젝트 만들기</strong> → <strong>빌드 → Realtime Database → 데이터베이스 만들기</strong><br/>
-                  3. <strong>테스트 모드로 시작</strong> 선택 → URL 복사 → 아래 붙여넣기 → 연결 테스트
+                  2. <strong>프로젝트 만들기 → 빌드 → Realtime Database → 데이터베이스 만들기</strong><br/>
+                  3. <strong>테스트 모드</strong> 선택 → URL 복사 → 아래 붙여넣기
                 </div>
                 <div style={{marginBottom:"1rem"}}><div style={{fontSize:".8rem",fontWeight:700,color:cv.ink2,marginBottom:".3rem"}}>Firebase Database URL</div><input style={{...inp(),fontFamily:"monospace",fontSize:".85rem"}} placeholder="https://my-project-default-rtdb.firebaseio.com" value={dbUrl} onChange={e=>{setDbUrl(e.target.value.trim());LC.set("fb_url",e.target.value.trim());}}/></div>
                 {dbUrl&&(<div style={{marginBottom:"1rem",padding:".85rem 1rem",background:"#e8f9f0",border:`2px solid ${cv.mintMd}`,borderRadius:10}}>
                   <div style={{fontWeight:800,fontSize:".9rem",color:cv.mint,marginBottom:".4rem"}}>📱 학생 공유 링크</div>
                   <div style={{display:"flex",gap:".5rem",alignItems:"center"}}>
                     <input readOnly style={{...inp(),flex:1,fontSize:".72rem",background:"#fff",fontFamily:"monospace"}} value={`${window.location.origin}${window.location.pathname}?bin=${encodeURIComponent(dbUrl)}`}/>
-                    <button onClick={()=>navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?bin=${encodeURIComponent(dbUrl)}`).then(()=>alert("✅ 링크 복사!\n\n학생들에게 공유하세요.")).catch(()=>{})} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),fontSize:".82rem",padding:".6rem 1.1rem",flexShrink:0,whiteSpace:"nowrap"}}>📋 복사</button>
+                    <button onClick={()=>navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?bin=${encodeURIComponent(dbUrl)}`).then(()=>alert("✅ 링크 복사!\n학생들에게 공유하세요.")).catch(()=>{})} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),fontSize:".82rem",padding:".6rem 1.1rem",flexShrink:0}}>📋 복사</button>
                   </div>
                 </div>)}
                 <div style={{display:"flex",gap:".6rem",flexWrap:"wrap"}}>
@@ -906,7 +901,6 @@ function App(){
                 </div>
                 {dbEnabled&&dbStatus==="ok"&&<div style={{marginTop:".6rem",fontSize:".76rem",color:cv.mint,fontWeight:700}}>✅ Firebase 연결됨 — 15초마다 자동 동기화</div>}
               </div>
-
               <div style={{...crd(),marginBottom:".9rem"}}>
                 <div style={{fontWeight:700,marginBottom:".9rem",fontSize:".97rem"}}>👨‍🏫 교사 프로필</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:".7rem",marginBottom:"1rem"}}>
@@ -926,17 +920,15 @@ function App(){
               </div>
               <div style={{...crd(),marginBottom:".9rem"}}>
                 <div style={{fontWeight:700,marginBottom:".4rem",fontSize:".97rem"}}>📋 활동별 전역 AI 지시문</div>
-                <div style={{fontSize:".78rem",color:cv.muted,marginBottom:".9rem",lineHeight:1.65,background:"#fffdf0",padding:".65rem .9rem",borderRadius:8,border:`1px solid ${cv.peachMd}`}}>각 활동별 AI 페르소나, 서술어 어미 제한 등을 설정합니다. <strong>학생 화면 미노출 · 세특 생성 시 자동 삽입</strong></div>
-                <div style={{display:"flex",flexDirection:"column",gap:".8rem"}}>
-                  {questions.map((q,i)=>(<div key={q.id||i}><div style={{fontSize:".78rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem",display:"flex",alignItems:"center",gap:".4rem"}}><span style={{...pill(cv.lavLt,cv.lav,cv.lavMd),fontSize:".7rem"}}>Q{i+1}</span><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{q.title}</span></div><textarea style={{...inp(),minHeight:72,resize:"vertical",lineHeight:1.75,background:"#fffdf0",border:`1.5px solid ${cv.peachMd}`,fontSize:".85rem"}} placeholder="예) 3인칭 서술, '-하였음.' 어미 사용, 수학 역량 강조..." value={(globalPrompts[i]||{}).text||""} onChange={e=>{const n=questions.map((_,j)=>({id:questions[j]?.id||j,text:j===i?e.target.value:(globalPrompts[j]||{}).text||""}));setGlobalPrompts(n);pushToServer({globalPrompts:n});}}/></div>))}
-                </div>
+                <div style={{fontSize:".78rem",color:cv.muted,marginBottom:".9rem",lineHeight:1.65,background:"#fffdf0",padding:".65rem .9rem",borderRadius:8,border:`1px solid ${cv.peachMd}`}}>세특 생성 시 자동 삽입. 학생 화면 미노출.</div>
+                <div style={{display:"flex",flexDirection:"column",gap:".8rem"}}>{questions.map((q,i)=>(<div key={q.id||i}><div style={{fontSize:".78rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem",display:"flex",alignItems:"center",gap:".4rem"}}><span style={{...pill(cv.lavLt,cv.lav,cv.lavMd),fontSize:".7rem"}}>Q{i+1}</span><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{q.title}</span></div><textarea style={{...inp(),minHeight:72,resize:"vertical",lineHeight:1.75,background:"#fffdf0",border:`1.5px solid ${cv.peachMd}`,fontSize:".85rem"}} placeholder="예) 3인칭 서술, '-하였음.' 어미 사용..." value={(globalPrompts[i]||{}).text||""} onChange={e=>{const n=questions.map((_,j)=>({id:questions[j]?.id||j,text:j===i?e.target.value:(globalPrompts[j]||{}).text||""}));setGlobalPrompts(n);pushToServer({globalPrompts:n});}}/></div>))}</div>
               </div>
               <div style={{...crd(),marginBottom:".9rem"}}>
                 <div style={{fontWeight:700,marginBottom:".9rem",fontSize:".97rem"}}>🔒 비밀번호 변경</div>
                 <div style={{display:"flex",gap:".6rem",alignItems:"flex-end"}}><div style={{flex:1}}><div style={{fontSize:".78rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem"}}>새 비밀번호 (숫자)</div><input type="password" style={inp()} placeholder="숫자만" value={newPw} onChange={e=>setNewPw(e.target.value.replace(/\D/g,"").slice(0,8))}/></div><button onClick={async()=>{if(newPw.length<2){alert("최소 2자리");return;}setTeacherPwServer(newPw);await pushToServer({teacherPw:newPw});setNewPw("");alert("변경 완료");}} style={btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`)}>변경</button></div>
               </div>
               <div style={{display:"flex",gap:".8rem",flexWrap:"wrap"}}>
-                <button onClick={async()=>{if(window.confirm("제출 데이터 전체 삭제?")){{setSubmissions([]);await pushToServer({submissions:[]});}}}} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`}}>제출 데이터 삭제</button>
+                <button onClick={async()=>{if(window.confirm("제출 데이터 전체 삭제?")){{setSubmissionsMap({});await pushToServer({submissions:[]});}}}} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`}}>제출 데이터 삭제</button>
                 <button onClick={async()=>{if(window.confirm("명단 복원?")){{setRoster(INIT_ROSTER);await pushToServer({roster:INIT_ROSTER});}}}} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`}}>명단 복원</button>
                 <button onClick={async()=>{if(window.confirm("문항 복원?")){{const dq=DEF_Q.map(migrateQ);setQuestions(dq);await pushToServer({questions:dq});}}}} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`}}>문항 복원</button>
               </div>
@@ -950,23 +942,27 @@ function App(){
   /* ════ WORKSHEET ════ */
   if(page==="worksheet"){
     const q=questions[curQ];if(!q)return null;
-    const ans=answers[q.id]||{text:"",poemSel:"",subImgs:{},subImgTexts:{},questionPhoto:null,status:"미제출"};
+    const ans=answers[q.id]||{text:"",poemSel:"",subImgs:{},subImgTexts:{},mainPhoto:null,questionPhoto:null,status:"미제출"};
     const cnt=(ans.text||"").length;
     const updAns=(f,v)=>setAnswers(p=>({...p,[q.id]:{...(p[q.id]||{}),[f]:v}}));
     const hasPoemImages=(q.poemImages||[]).length>0;
     const selPoem=(q.poemImages||[]).find(p=>p.label===ans.poemSel);
     const qid=q.id;const isLast=curQ===questions.length-1;
-    const mOcrKey=qid;
     const hasSubQs=(q.subQuestions||[]).some(sq=>sq);
     const embedUrl=getEmbedUrl(q.videoUrl);
     const actStatus=ans.status||"미제출";
     const isSubmitted=actStatus==="제출완료";
     const isRejected=actStatus==="재제출대기";
     const uploadSt=driveUploadStatus[qid]||"none";
+    const mainImgOcrKey=`${qid}_main`;
 
     return(
       <div style={{background:cv.bg,minHeight:"100vh"}}>
         {generating&&<Spinner prog={genProg}/>}
+        {/* ★ 문항 갱신 알림 배너 */}
+        {qVersion>0&&<div style={{position:"fixed",top:56,left:0,right:0,zIndex:90,background:"#c05c1a",color:"#fff",textAlign:"center",padding:".55rem",fontSize:".83rem",fontWeight:700}}>
+          📢 교사가 문항을 업데이트했습니다 — 화면에 자동 반영되었습니다
+        </div>}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 1rem",height:56,background:"#fff",borderBottom:`2px solid ${cv.border}`,position:"sticky",top:0,zIndex:80,gap:"1rem"}}>
           <div style={{display:"flex",flexDirection:"column",justifyContent:"center",minWidth:0}}>
             <span onClick={reset} style={{fontWeight:900,fontSize:"1rem",cursor:"pointer",color:cv.ink,lineHeight:1.2}}>화법과 작문 <span style={{color:cv.lav}}>×</span> 확률과 통계</span>
@@ -979,37 +975,28 @@ function App(){
           </div>
         </div>
 
-        <div style={{maxWidth:780,margin:"0 auto",padding:"1.4rem 1rem 4rem"}}>
+        <div style={{maxWidth:780,margin:"0 auto",padding:`${qVersion>0?"2.5rem":"1.4rem"} 1rem 4rem`}}>
           {allActivitiesSubmitted&&(
             <div style={{...crd({background:cv.mintLt,border:`2px solid ${cv.mintMd}`}),marginBottom:"1.2rem",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:".7rem"}}>
-              <div><div style={{fontWeight:800,fontSize:".95rem",color:cv.mint}}>🎉 모든 활동 제출 완료!</div><div style={{fontSize:".78rem",color:cv.ink2,marginTop:".2rem"}}>검토 후 교세특을 자동 생성할 수 있습니다.</div></div>
+              <div><div style={{fontWeight:800,fontSize:".95rem",color:cv.mint}}>🎉 모든 활동 제출 완료!</div></div>
               <button onClick={()=>{setSubmitted({stuId,stuName,answers:{...answers},at:new Date().toLocaleString("ko-KR")});setPage("review");}} style={{...btn(`linear-gradient(135deg,${cv.lav},${cv.mint})`),padding:".6rem 1.2rem",fontSize:".88rem",fontWeight:800}}>검토 및 교세특 생성 →</button>
             </div>
           )}
-
           <div style={{marginBottom:"1.2rem"}}>
-            <div style={{textAlign:"center",fontSize:".82rem",color:cv.muted,background:"#fff",border:`1.5px solid ${cv.border}`,borderRadius:20,padding:".45rem 1rem",marginBottom:".5rem"}}>
-              <strong style={{color:cv.ink}}>{submittedCount}/{questions.length}</strong>개 활동 제출 완료{allActivitiesSubmitted&&<span style={{color:cv.mint,fontWeight:700}}> ✓</span>}
-            </div>
+            <div style={{textAlign:"center",fontSize:".82rem",color:cv.muted,background:"#fff",border:`1.5px solid ${cv.border}`,borderRadius:20,padding:".45rem 1rem",marginBottom:".5rem"}}><strong style={{color:cv.ink}}>{submittedCount}/{questions.length}</strong>개 활동 제출 완료{allActivitiesSubmitted&&<span style={{color:cv.mint,fontWeight:700}}> ✓</span>}</div>
             <div style={{height:6,background:cv.border,borderRadius:999,overflow:"hidden"}}><div style={{height:"100%",width:((submittedCount/Math.max(questions.length,1))*100)+"%",background:`linear-gradient(90deg,${cv.lavMd},${cv.mintMd})`,transition:"width .4s"}}/></div>
           </div>
-
           <div style={{display:"flex",gap:".4rem",flexWrap:"wrap",marginBottom:"1.1rem"}}>
             {questions.map((qq,i)=>{
-              const sSt=answers[qq.id]?.status||"미제출";
-              const active=curQ===i;
+              const sSt=answers[qq.id]?.status||"미제출";const active=curQ===i;
               const bg=active?cv.lav:sSt==="제출완료"?cv.mintLt:sSt==="재제출대기"?"#fff4ec":"#fff";
               const col=active?"#fff":sSt==="제출완료"?cv.mint:sSt==="재제출대기"?"#c05c1a":cv.muted;
               const bc=active?cv.lav:sSt==="제출완료"?cv.mintMd:sSt==="재제출대기"?"#ffcba4":cv.border2;
-              return<button key={qq.id} onClick={()=>{setCurQ(i);setVideoOpen(false);}} style={{padding:".34rem .8rem",fontSize:".77rem",border:`1.5px solid ${bc}`,background:bg,color:col,borderRadius:20,cursor:"pointer",fontWeight:700}}>{i+1}. {qq.title.length>8?qq.title.slice(0,8)+"…":qq.title}{sSt==="제출완료"?" ✓":sSt==="재제출대기"?" ⚠":""}</button>;
+              return<button key={qq.id} onClick={()=>{setCurQ(i);}} style={{padding:".34rem .8rem",fontSize:".77rem",border:`1.5px solid ${bc}`,background:bg,color:col,borderRadius:20,cursor:"pointer",fontWeight:700}}>{i+1}. {qq.title.length>8?qq.title.slice(0,8)+"…":qq.title}{sSt==="제출완료"?" ✓":sSt==="재제출대기"?" ⚠":""}</button>;
             })}
           </div>
 
-          <div style={{display:"flex",gap:".4rem",marginBottom:"1rem",flexWrap:"wrap"}}>
-            {[["1단계","기본문항 답변",cv.lav,cv.lavLt],["2단계","추가문항 사진",cv.peachDk,cv.peachLt],["3단계","이 문항 페이지 사진",cv.mint,cv.mintLt]].map(([step,label,col,bg])=>(<div key={step} style={{display:"flex",alignItems:"center",gap:".3rem",padding:".25rem .65rem",borderRadius:18,background:bg,border:`1px solid ${col}33`}}><span style={{fontWeight:800,fontSize:".72rem",color:col}}>{step}</span><span style={{fontSize:".72rem",color:col,fontWeight:600}}>{label}</span></div>))}
-          </div>
-
-          <div style={{...crd(),marginBottom:"1rem",animation:"fadeUp .25s ease",opacity:isSubmitted?.85:1}}>
+          <div style={{...crd(),marginBottom:"1rem",animation:"fadeUp .25s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:".55rem",flexWrap:"wrap",gap:".5rem"}}>
               <span style={{fontWeight:900,fontSize:"1.8rem",color:cv.border2,lineHeight:1}}>0{curQ+1}</span>
               <div style={{display:"flex",alignItems:"center",gap:".5rem"}}>
@@ -1022,25 +1009,48 @@ function App(){
               <span style={{fontWeight:800,fontSize:"1.04rem",color:cv.ink}}>{q.title}</span>
               {q.videoUrl&&(<button onClick={()=>setVideoOpen(v=>!v)} style={{...btn(videoOpen?"#c0392b":"#e53935"),fontSize:".8rem",padding:".35rem .88rem",borderRadius:18,flexShrink:0}}>{videoOpen?"✕ 닫기":"▶ 영상보기"}</button>)}
             </div>
-            {q.videoUrl&&videoOpen&&(<div style={{borderRadius:10,overflow:"hidden",marginBottom:"1rem",background:"#000",position:"relative",paddingTop:"56.25%"}}><iframe src={embedUrl} title="학습 영상" allowFullScreen allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",border:"none"}}/></div>)}
+            {q.videoUrl&&videoOpen&&(<div style={{borderRadius:10,overflow:"hidden",marginBottom:"1rem",background:"#000",position:"relative",paddingTop:"56.25%"}}><iframe src={getEmbedUrl(q.videoUrl)} title="학습 영상" allowFullScreen allow="accelerometer;autoplay;clipboard-write;encrypted-media;gyroscope;picture-in-picture" style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",border:"none"}}/></div>)}
             {q.rubric?.length>0&&<div style={{display:"flex",gap:".3rem",flexWrap:"wrap",marginBottom:".8rem"}}>{q.rubric.map(r=><span key={r} style={pill(cv.peachLt,cv.peachDk,cv.peachMd)}>◆ {r}</span>)}</div>}
 
             {hasPoemImages&&(<div style={{background:cv.skyLt,border:`1.5px solid ${cv.skyMd}`,borderRadius:10,padding:".8rem .95rem",marginBottom:".9rem"}}>
               <div style={{fontWeight:800,fontSize:".85rem",color:"#1a5f8a",marginBottom:".55rem"}}>📜 지문 / 시</div>
               {(q.poemImages||[]).length===1
-                ?<div><img src={q.poemImages[0].dataUrl} alt="" style={{maxWidth:"100%",borderRadius:8,border:`1.5px solid ${cv.border}`,display:"block",maxHeight:420,objectFit:"contain"}}/><div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:".5rem"}}><span style={{fontSize:".78rem",color:cv.muted}}>{q.poemImages[0].label}</span><button onClick={()=>runOCR(curQ,q.poemImages[0].dataUrl)} disabled={!!ocrLoading[mOcrKey]} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".78rem",padding:".32rem .8rem",opacity:ocrLoading[mOcrKey]?.6:1}}>{ocrLoading[mOcrKey]?"⏳":"🔍 AI 읽기"}</button></div></div>
-                :<div><select style={inp()} value={ans.poemSel||""} onChange={e=>updAns("poemSel",e.target.value)}><option value="">-- 선택 --</option>{(q.poemImages||[]).map((pi,i)=><option key={i} value={pi.label}>{pi.label}</option>)}</select>{selPoem&&<div style={{marginTop:".65rem"}}><img src={selPoem.dataUrl} alt="" style={{maxWidth:"100%",borderRadius:8,border:`1.5px solid ${cv.border}`,display:"block",maxHeight:420,objectFit:"contain"}}/></div>}</div>
-              }
+                ?<img src={q.poemImages[0].dataUrl} alt="" style={{maxWidth:"100%",borderRadius:8,border:`1.5px solid ${cv.border}`,display:"block",maxHeight:420,objectFit:"contain"}}/>
+                :<div><select style={inp()} value={ans.poemSel||""} onChange={e=>updAns("poemSel",e.target.value)}><option value="">-- 선택 --</option>{(q.poemImages||[]).map((pi,i)=><option key={i} value={pi.label}>{pi.label}</option>)}</select>{selPoem&&<div style={{marginTop:".65rem"}}><img src={selPoem.dataUrl} alt="" style={{maxWidth:"100%",borderRadius:8,border:`1.5px solid ${cv.border}`,display:"block",maxHeight:420,objectFit:"contain"}}/></div>}</div>}
             </div>)}
 
+            {/* 1단계 문항 */}
             <div style={{background:"#fffbf0",borderLeft:`3px solid ${cv.peachMd}`,padding:".85rem 1rem",borderRadius:"0 9px 9px 0",marginBottom:".9rem"}}>
               <div style={{display:"flex",alignItems:"center",gap:".45rem",marginBottom:".45rem"}}><span style={pill(cv.peachLt,cv.peachDk,cv.peachMd)}>1단계</span><span style={{fontWeight:800,fontSize:".82rem",color:cv.peachDk}}>기본문항 답변</span></div>
               <div style={{fontWeight:700,fontSize:".9rem",lineHeight:1.85,color:cv.ink2,whiteSpace:"pre-line"}}>{q.question}</div>
               {(q.subQuestions||[]).filter(s=>s).length>0&&(<div style={{marginTop:".55rem",paddingTop:".55rem",borderTop:`1px dashed ${cv.peachMd}`}}>{(q.subQuestions||[]).map((sq,si)=>sq&&(<div key={si} style={{fontWeight:700,fontSize:".88rem",lineHeight:1.85,color:cv.ink2,display:"flex",gap:".4rem"}}><span style={{color:cv.peachDk,flexShrink:0}}>{si+1})</span><span>{sq}</span></div>))}</div>)}
             </div>
-            <textarea style={{...inp(),minHeight:130,resize:"vertical",lineHeight:1.85,background:isSubmitted?"#f8fff8":"#fafcff",marginBottom:".35rem"}} placeholder={q.placeholder||"답변을 입력하세요..."} value={ans.text} maxLength={q.maxLen} onChange={e=>updAns("text",e.target.value)} readOnly={isSubmitted}/>
+
+            {/* ★ 답변 사진 업로드 + OCR */}
+            <div style={{background:"#f5f0ff",border:`1.5px solid ${cv.lavMd}`,borderRadius:10,padding:".8rem .95rem",marginBottom:".75rem"}}>
+              <div style={{display:"flex",alignItems:"center",gap:".45rem",marginBottom:".55rem"}}>
+                <span style={pill(cv.lavLt,cv.lav,cv.lavMd)}>📷 답변 사진</span>
+                <span style={{fontSize:".8rem",color:cv.ink2,fontWeight:600}}>손글씨 답변 촬영 → AI가 텍스트로 자동 변환</span>
+              </div>
+              <ImgUpload value={ans.mainPhoto||null} onChange={v=>{updAns("mainPhoto",v);if(!v)setOcrDone(p=>({...p,[mainImgOcrKey]:false}));}} label="📷 답변 사진 업로드 (손글씨·인쇄물)"/>
+              {ans.mainPhoto&&!isSubmitted&&(
+                <div style={{marginTop:".6rem",display:"flex",alignItems:"center",gap:".6rem",flexWrap:"wrap"}}>
+                  <button onClick={async()=>{
+                    const keys={...apiKeys};
+                    if(!keys.openai){const k=prompt("OpenAI API 키(OCR)");if(!k)return;const nk={...keys,openai:k};setApiKeys(nk);pushToServer({apiKeys:nk});}
+                    await runOCR(curQ,ans.mainPhoto,"main");
+                  }} disabled={!!ocrLoading[mainImgOcrKey]} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".82rem",padding:".42rem 1rem",opacity:ocrLoading[mainImgOcrKey]?.6:1,display:"flex",alignItems:"center",gap:".4rem"}}>
+                    {ocrLoading[mainImgOcrKey]?<><div style={{width:13,height:13,border:"2px solid rgba(255,255,255,.4)",borderTopColor:"#fff",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>인식 중...</>:"🔍 AI 텍스트 인식 → 답변 칸 자동 입력"}
+                  </button>
+                  {ocrDone[mainImgOcrKey]&&<span style={{fontSize:".78rem",color:cv.mint,fontWeight:700}}>✅ 인식 완료</span>}
+                </div>
+              )}
+            </div>
+
+            <textarea style={{...inp(),minHeight:130,resize:"vertical",lineHeight:1.85,background:isSubmitted?"#f8fff8":"#fafcff",marginBottom:".35rem"}} placeholder={q.placeholder||"답변을 직접 입력하거나 위에서 사진 촬영 후 AI 인식을 이용하세요..."} value={ans.text} maxLength={q.maxLen} onChange={e=>updAns("text",e.target.value)} readOnly={isSubmitted}/>
             <div style={{textAlign:"right",fontSize:".74rem",color:cnt>q.maxLen*.9?cv.rose:cv.muted,marginBottom:"1rem",fontWeight:cnt>q.maxLen*.9?700:400}}>{cnt} / {q.maxLen}자</div>
 
+            {/* 2단계 추가문항 */}
             {hasSubQs&&(<>
               <div style={{display:"flex",alignItems:"center",gap:".45rem",marginBottom:".7rem"}}><span style={pill(cv.peachLt,cv.peachDk,cv.peachMd)}>2단계</span><span style={{fontWeight:800,fontSize:".88rem",color:cv.peachDk}}>추가문항 수기 답변 사진</span></div>
               <div style={{display:"flex",flexDirection:"column",gap:".7rem",marginBottom:"1.2rem"}}>
@@ -1049,7 +1059,7 @@ function App(){
                   const subKey=`${qid}_sub${si}`;const subImg=(ans.subImgs||{})[si]||null;const subTxt=(ans.subImgTexts||{})[si]||"";
                   return(<div key={si} style={{background:"#f8f4ff",border:`1.5px solid ${cv.lavMd}`,borderRadius:10,padding:".8rem .95rem"}}>
                     <div style={{fontWeight:800,fontSize:".84rem",color:cv.lav,marginBottom:".3rem"}}>{si+1}) {sq}</div>
-                    <ImgUpload value={subImg} onChange={v=>{setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgs:{...((p[qid]||{}).subImgs||{}),[si]:v}}}));}} label="📷 수기 답변 사진"/>
+                    <ImgUpload value={subImg} onChange={v=>setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgs:{...((p[qid]||{}).subImgs||{}),[si]:v}}}))} label="📷 수기 답변 사진"/>
                     {subImg&&(<div style={{marginTop:".6rem"}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:".3rem"}}><span style={{fontSize:".77rem",fontWeight:700,color:cv.ink2}}>OCR 결과</span><button onClick={()=>runOCR(curQ,subImg,si)} disabled={!!ocrLoading[subKey]} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".74rem",padding:".28rem .75rem",opacity:ocrLoading[subKey]?.6:1}}>{ocrLoading[subKey]?"⏳":"🔍 AI 읽기"}</button></div>
                       <textarea style={{...inp(),minHeight:68,resize:"vertical",lineHeight:1.8,background:"#fafcff"}} value={subTxt} onChange={e=>setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgTexts:{...((p[qid]||{}).subImgTexts||{}),[si]:e.target.value}}}))} placeholder="OCR 결과 또는 직접 입력..."/>
@@ -1059,6 +1069,7 @@ function App(){
               </div>
             </>)}
 
+            {/* 3단계 전체 페이지 사진 */}
             <div style={{background:cv.mintLt,border:`1.5px solid ${cv.mintMd}`,borderRadius:10,padding:".85rem .95rem",marginBottom:"1rem"}}>
               <div style={{display:"flex",alignItems:"center",gap:".45rem",marginBottom:".5rem"}}><span style={pill(cv.mintLt,cv.mint,cv.mintMd)}>3단계</span><span style={{fontWeight:800,fontSize:".88rem",color:cv.mint}}>이 문항 페이지 전체 사진</span></div>
               <div style={{fontSize:".8rem",color:cv.ink2,marginBottom:".65rem",lineHeight:1.6}}>현재 문항이 작성된 <strong>이 페이지 전체</strong>를 촬영하여 업로드해주세요.</div>
@@ -1066,26 +1077,19 @@ function App(){
               {ans.questionPhoto&&<div style={{marginTop:".45rem",fontSize:".77rem",color:cv.mint,fontWeight:700}}>✅ 사진 첨부 완료</div>}
             </div>
 
-            {isRejected&&(
-              <div style={{background:"#fff4ec",border:`2px solid #ffcba4`,borderRadius:10,padding:".85rem 1rem",marginBottom:"1rem"}}>
-                <div style={{fontWeight:800,fontSize:".88rem",color:"#c05c1a",marginBottom:".35rem",animation:"pulse 1.5s ease infinite"}}>⚠ 교사 반려 피드백</div>
-                {ans.rejectionNote&&<div style={{fontSize:".85rem",color:cv.ink2,lineHeight:1.7,marginBottom:".5rem",background:"rgba(255,255,255,.8)",padding:".5rem .75rem",borderRadius:7}}>{ans.rejectionNote}</div>}
-                <div style={{fontSize:".8rem",color:"#c05c1a"}}>답변과 사진을 수정한 후 다시 제출해주세요.</div>
-              </div>
-            )}
+            {/* 반려 피드백 */}
+            {isRejected&&(<div style={{background:"#fff4ec",border:`2px solid #ffcba4`,borderRadius:10,padding:".85rem 1rem",marginBottom:"1rem"}}>
+              <div style={{fontWeight:800,fontSize:".88rem",color:"#c05c1a",marginBottom:".35rem",animation:"pulse 1.5s ease infinite"}}>⚠ 교사 반려 피드백</div>
+              {ans.rejectionNote&&<div style={{fontSize:".85rem",color:cv.ink2,lineHeight:1.7,marginBottom:".5rem",background:"rgba(255,255,255,.8)",padding:".5rem .75rem",borderRadius:7}}>{ans.rejectionNote}</div>}
+              <div style={{fontSize:".8rem",color:"#c05c1a"}}>답변과 사진을 수정한 후 다시 제출해주세요.</div>
+            </div>)}
 
-            {/* ★ 드라이브 업로드 상태 표시 */}
-            {uploadSt==="uploading"&&(
-              <div style={{background:"#e8f4fd",border:`1.5px solid ${cv.skyMd}`,borderRadius:9,padding:".65rem 1rem",marginBottom:".8rem",display:"flex",alignItems:"center",gap:".55rem"}}>
-                <div style={{width:16,height:16,border:`2px solid ${cv.skyMd}`,borderTopColor:"#1a7ab0",borderRadius:"50%",animation:"spin 1s linear infinite",flexShrink:0}}/>
-                <span style={{fontSize:".82rem",color:"#1a5f8a",fontWeight:700}}>📤 구글 드라이브에 사진 업로드 중...</span>
-              </div>
-            )}
-            {uploadSt==="done"&&(
-              <div style={{background:"#e6f9f2",border:`1.5px solid ${cv.mintMd}`,borderRadius:9,padding:".55rem 1rem",marginBottom:".8rem",fontSize:".82rem",color:cv.mint,fontWeight:700}}>
-                ✅ 드라이브 업로드 완료
-              </div>
-            )}
+            {/* ★ 서버 저장 오류 */}
+            {submitErr[qid]&&(<div style={{background:cv.roseLt,border:`1.5px solid ${cv.roseMd}`,borderRadius:9,padding:".65rem 1rem",marginBottom:".8rem",fontSize:".82rem",color:cv.rose,fontWeight:700}}>{submitErr[qid]}</div>)}
+
+            {/* 드라이브 업로드 상태 */}
+            {uploadSt==="uploading"&&(<div style={{background:"#e8f4fd",border:`1.5px solid ${cv.skyMd}`,borderRadius:9,padding:".55rem 1rem",marginBottom:".8rem",display:"flex",alignItems:"center",gap:".55rem"}}><div style={{width:14,height:14,border:`2px solid ${cv.skyMd}`,borderTopColor:"#1a7ab0",borderRadius:"50%",animation:"spin 1s linear infinite",flexShrink:0}}/><span style={{fontSize:".82rem",color:"#1a5f8a",fontWeight:700}}>📤 드라이브 업로드 중...</span></div>)}
+            {uploadSt==="done"&&(<div style={{background:"#e6f9f2",border:`1.5px solid ${cv.mintMd}`,borderRadius:9,padding:".5rem 1rem",marginBottom:".8rem",fontSize:".82rem",color:cv.mint,fontWeight:700}}>✅ 드라이브 업로드 완료</div>)}
 
             {isSubmitted?(
               <div style={{background:cv.mintLt,border:`1.5px solid ${cv.mintMd}`,borderRadius:10,padding:".75rem 1rem",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
@@ -1094,14 +1098,14 @@ function App(){
               </div>
             ):(
               <button onClick={()=>submitActivity(qid)} disabled={!!submitting[qid]} style={{...btn(`linear-gradient(135deg,${isRejected?"#c05c1a,#e67e22":cv.lav+",#9b59b6"})`),width:"100%",padding:".85rem",fontSize:".95rem",fontWeight:800,borderRadius:10,opacity:submitting[qid]?.6:1}}>
-                {submitting[qid]?"⏳ 제출 중...":(isRejected?"↺ 다시 제출하기":"이 활동 제출하기 ✓")}
+                {submitting[qid]?"⏳ 서버에 저장 중...":(isRejected?"↺ 다시 제출하기":"이 활동 제출하기 ✓")}
               </button>
             )}
           </div>
 
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:"1.1rem",borderTop:`1.5px solid ${cv.border}`}}>
-            <button disabled={curQ===0} onClick={()=>{setCurQ(p=>p-1);setVideoOpen(false);}} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem",opacity:curQ===0?.35:1}}>← 이전</button>
-            {!isLast?<button onClick={()=>{setCurQ(p=>p+1);setVideoOpen(false);}} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem"}}>다음 →</button>
+            <button disabled={curQ===0} onClick={()=>setCurQ(p=>p-1)} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem",opacity:curQ===0?.35:1}}>← 이전</button>
+            {!isLast?<button onClick={()=>setCurQ(p=>p+1)} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem"}}>다음 →</button>
             :<button onClick={()=>setCurQ(0)} style={{...btn(cv.lavLt,cv.lav),border:`1.5px solid ${cv.lavMd}`,borderRadius:20,padding:".5rem 1.1rem"}}>← 첫 문항으로</button>}
           </div>
         </div>
@@ -1118,7 +1122,7 @@ function App(){
         <span style={{fontSize:".76rem",color:cv.muted}}>{submitted.stuName}</span>
       </div>
       <div style={{maxWidth:780,margin:"0 auto",padding:"1.4rem 1rem 4rem"}}>
-        <div style={{textAlign:"center",marginBottom:"1.6rem"}}><h1 style={{fontWeight:800,fontSize:"1.45rem",color:cv.ink,marginBottom:".3rem"}}>활동지 제출 완료 🎉</h1><div style={{fontSize:".82rem",color:cv.muted}}>모든 활동이 제출되었습니다</div></div>
+        <div style={{textAlign:"center",marginBottom:"1.6rem"}}><h1 style={{fontWeight:800,fontSize:"1.45rem",color:cv.ink,marginBottom:".3rem"}}>활동지 제출 완료 🎉</h1></div>
         <div style={{display:"flex",flexDirection:"column",gap:".85rem",marginBottom:"1.4rem"}}>
           {questions.map(q=>{const a=submitted.answers[q.id]||{};return(<div key={q.id} style={crd()}><div style={{background:`linear-gradient(90deg,${cv.lavMd},${cv.mintMd})`,padding:".58rem 1rem",margin:"-1.2rem -1.2rem .9rem",display:"flex",justifyContent:"space-between",borderRadius:"11px 11px 0 0"}}><strong style={{fontSize:".9rem",color:cv.ink}}>{q.title}</strong><span style={{fontSize:".74rem",color:cv.ink2}}>{q.subject}</span></div><div style={{fontSize:".88rem",lineHeight:1.85,whiteSpace:"pre-wrap",color:cv.ink2}}>{a.text||"(미작성)"}</div></div>);})}
         </div>
@@ -1151,7 +1155,6 @@ function App(){
   );
   return null;
 }
-
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 </script>
 </body>
