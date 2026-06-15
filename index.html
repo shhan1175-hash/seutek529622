@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>화법과 작문 × 확률과 통계  | V7</title>
+<title>화법과 작문 × 확률과 통계 | V7</title>
 <link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" rel="stylesheet"/>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -48,7 +48,6 @@ async function compressImage(dataUrl,maxW=800,quality=0.6){
       const c=document.createElement("canvas");c.width=w;c.height=h;
       c.getContext("2d").drawImage(img,0,0,w,h);
       const result=c.toDataURL("image/jpeg",quality);
-      // 여전히 너무 크면 한 번 더 압축
       if(result.length>800000){
         const c2=document.createElement("canvas");
         const sc2=Math.min(1,600/w);c2.width=Math.round(w*sc2);c2.height=Math.round(h*sc2);
@@ -77,6 +76,31 @@ const FB={
     const res=await fetch(url,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
     if(!res.ok)throw new Error(`제출 저장 실패 (${res.status})`);
     return await res.json();
+  },
+  /* ★ A안: 가벼운 폴링 — submissions를 shallow=true로 키 목록만 받지 않고,
+     대신 사진 필드를 제외한 가벼운 전체 데이터를 받기 위해 일반 load 사용 후 클라이언트에서 사진 제거.
+     단, 진짜 전송량을 줄이기 위해 submissions는 별도 경량 경로로 불러옴. */
+  async loadLight(u){
+    // 사진을 제외한 데이터만: 전체를 받되 submissions 내부 사진은 서버에서 못 거르므로
+    // submissions를 제외한 메타 + submissions의 상태 정보만 별도로 가져온다.
+    const base=u.replace(/\/+$/,"");
+    const res=await fetch(base+"/vpc.json?shallow=false");
+    if(!res.ok)throw new Error(`불러오기 실패 (${res.status})`);
+    const data=(await res.json())||{};
+    // 클라이언트에서 사진 제거 (폴링 시 상태만 필요)
+    if(data.submissions){
+      const strip=s=>{const r={...s,answers:{}};Object.keys(s.answers||{}).forEach(qid=>{const a=s.answers[qid]||{};r.answers[qid]={text:a.text,subImgTexts:a.subImgTexts,status:a.status,submittedAt:a.submittedAt,rejectionNote:a.rejectionNote,rejectedAt:a.rejectedAt,_hasMain:!!a.mainPhoto,_hasQuestion:!!a.questionPhoto,_hasSub:!!(a.subImgs&&Object.values(a.subImgs).some(v=>v))};});return r;};
+      if(Array.isArray(data.submissions))data.submissions=data.submissions.map(strip);
+      else{const m={};Object.entries(data.submissions).forEach(([k,v])=>{if(v&&v.stuId)m[k]=strip(v);});data.submissions=m;}
+    }
+    return data;
+  },
+  /* ★ A안: 사진보기 클릭 시 특정 학생 사진만 불러오기 */
+  async loadStudentPhotos(u,stuId){
+    const url=u.replace(/\/+$/,"")+`/vpc/submissions/${stuId}.json`;
+    const res=await fetch(url);
+    if(!res.ok)throw new Error(`사진 불러오기 실패 (${res.status})`);
+    return(await res.json())||null;
   },
 };
 
@@ -133,7 +157,7 @@ const DEF_KOR_COMP=["비판적·창의적 사고 역량","자료·정보 활용 
 const DEF_MATH_COMP=["문제해결 역량","추론 역량","의사소통 역량","연결 역량","정보처리 역량"];
 const AI_ENGINES=["Claude","Gemini","ChatGPT"];
 const FIXED_TABS=new Set(["home","dashboard","submissions","questions","settings"]);
-const AUTO_LOGOUT_MS=60*1000; // ★ 1분 자동 로그아웃
+const AUTO_LOGOUT_MS=60*1000;
 
 async function prepareQForSave(qs){
   return Promise.all((qs||[]).map(async q=>({...q,poemImages:await Promise.all((q.poemImages||[]).map(async img=>({...img,dataUrl:img.dataUrl?await compressImage(img.dataUrl,400,0.5):""})))})));
@@ -174,7 +198,6 @@ function SideMenu({menu,tab,onSelect}){
   </>);
 }
 
-/* ★ 이미지 업로드 — 압축 후 저장, 진행 상태 표시 */
 function ImgUpload({value,onChange,label="📷 사진 업로드"}){
   const ref=useRef();const [processing,setProcessing]=useState(false);
   const hf=async e=>{
@@ -276,17 +299,16 @@ function App(){
   const [driveUploadStatus,setDriveUploadStatus]=useState({});
   const [submitErr,setSubmitErr]=useState({});
   const [qVersion,setQVersion]=useState(0);
-  /* ★ 자동 로그아웃 */
+  /* ★ A안: 사진보기 모달 상태 */
+  const [photoModal,setPhotoModal]=useState(null); // {loading, imgs, stuName, qTitle}
   const logoutTimer=useRef(null);
   const [logoutWarn,setLogoutWarn]=useState(false);
 
-  /* ★ 자동 로그아웃 — 1분, 학생 모드에서만 */
   const resetLogoutTimer=useCallback(()=>{
     if(logoutTimer.current)clearTimeout(logoutTimer.current);
     setLogoutWarn(false);
     logoutTimer.current=setTimeout(()=>{
       setLogoutWarn(true);
-      // 10초 후 최종 로그아웃
       logoutTimer.current=setTimeout(()=>{
         LC.remove("stu_session");
         setPage("login");setStuId("");setStuName("");setAnswers({});setCurQ(0);
@@ -303,26 +325,34 @@ function App(){
     return()=>{events.forEach(e=>window.removeEventListener(e,resetLogoutTimer));if(logoutTimer.current)clearTimeout(logoutTimer.current);};
   },[page,resetLogoutTimer]);
 
-  /* ★ 학생 세션 복원 — 앱 재진입 시 로그인 유지 */
-  const restoreSession=useCallback(async(questionsFromServer)=>{
-    const sess=LC.get("stu_session",null);
-    if(!sess||!sess.stuId||!sess.stuName)return false;
-    const q_list=questionsFromServer||DEF_Q;
-    // 세션 만료 확인 (24시간)
-    if(Date.now()-sess.savedAt>86400000){LC.remove("stu_session");return false;}
-    setStuId(sess.stuId);setStuName(sess.stuName);
-    // submissionsMap에서 기존 답변 복원
-    const existingSub=submissionsMap[sess.stuId]||LC.get("lc_submissions",[]).find?.(s=>s.stuId===sess.stuId);
-    if(existingSub)setAnswers(existingSub.answers||{});
-    setPage("worksheet");setCurQ(sess.curQ||0);
-    return true;
-  },[submissionsMap]);
-
   const mapFromArray=arr=>{const m={};(arr||[]).forEach(s=>{if(s?.stuId)m[s.stuId]=s;});return m;};
   const applySubmissions=raw=>{
     if(!raw)return;
     if(Array.isArray(raw)){setSubmissionsMap(mapFromArray(raw));return;}
     if(typeof raw==="object"){const vals=Object.values(raw).filter(v=>v&&typeof v==="object"&&v.stuId);if(vals.length)setSubmissionsMap(mapFromArray(vals));}
+  };
+  /* ★ A안: 폴링용 — 사진 제외 데이터를 받아 기존 사진은 보존하며 병합 */
+  const mergeLightSubmissions=raw=>{
+    if(!raw)return;
+    const incoming=Array.isArray(raw)?mapFromArray(raw):(()=>{const m={};Object.values(raw).forEach(v=>{if(v&&v.stuId)m[v.stuId]=v;});return m;})();
+    setSubmissionsMap(prev=>{
+      const next={...prev};
+      Object.entries(incoming).forEach(([sid,light])=>{
+        const old=prev[sid];
+        const mergedAns={};
+        Object.keys(light.answers||{}).forEach(qid=>{
+          const la=light.answers[qid]||{};const oa=(old?.answers||{})[qid]||{};
+          mergedAns[qid]={
+            ...oa, // 기존 사진(mainPhoto 등) 보존
+            text:la.text,subImgTexts:la.subImgTexts,status:la.status,
+            submittedAt:la.submittedAt,rejectionNote:la.rejectionNote,rejectedAt:la.rejectedAt,
+            _hasMain:la._hasMain,_hasQuestion:la._hasQuestion,_hasSub:la._hasSub
+          };
+        });
+        next[sid]={...old,stuId:light.stuId,stuName:light.stuName,answers:mergedAns,at:light.at||old?.at};
+      });
+      return next;
+    });
   };
 
   const applyData=useCallback(d=>{
@@ -342,7 +372,6 @@ function App(){
     if(d.mathComp&&Array.isArray(d.mathComp))setMathComp(d.mathComp);
   },[]);
 
-  /* ★ 초기 로드 — Firebase 우선, localStorage는 fallback만 */
   useEffect(()=>{
     (async()=>{
       setLoading(true);
@@ -359,7 +388,6 @@ function App(){
           setDbStatus("ok");
         }catch(e){
           console.warn("Firebase 로드 실패:",e.message);setDbStatus("error");
-          // Firebase 실패시만 localStorage 사용
           const lf={roster:LC.get("lc_roster",INIT_ROSTER),questions:LC.get("lc_questions",DEF_Q),submissions:LC.get("lc_submissions",[]),att:LC.get("lc_att",{}),attNote:LC.get("lc_attNote",{}),setkStore:LC.get("lc_setkStore",{}),teacher1:LC.get("lc_teacher1",{name:"",subject:""}),teacher2:LC.get("lc_teacher2",{name:"",subject:"",enabled:false}),globalPrompts:LC.get("lc_globalPrompts",DEF_Q.map(q=>({id:q.id,text:""}))),apiKeys:LC.get("lc_apiKeys",{claude:"",gemini:"",openai:""}),aiEngine:LC.get("lc_aiEngine","Claude"),teacherPw:LC.get("lc_teacherPw","1234"),driveUrls:LC.get("lc_driveUrls",{}),rootUrl:LC.get("lc_rootUrl",""),appsScriptUrl:LC.get("apps_script_url",""),korComp:LC.get("lc_korComp",DEF_KOR_COMP),mathComp:LC.get("lc_mathComp",DEF_MATH_COMP)};
           applyData(lf);
           setSetkDashStu(lf.roster[0]?.id||INIT_ROSTER[0].id);
@@ -370,10 +398,8 @@ function App(){
         setSetkDashStu(lf.roster[0]?.id||INIT_ROSTER[0].id);
       }
 
-      // ★ 세션 복원 시도
       const sess=LC.get("stu_session",null);
       if(sess&&sess.stuId&&sess.stuName&&Date.now()-sess.savedAt<=86400000){
-        const qs=serverData?.questions||LC.get("lc_questions",DEF_Q);
         const subMap=serverData?.submissions?mapFromArray(Array.isArray(serverData.submissions)?serverData.submissions:Object.values(serverData.submissions||{})):{};
         const existingSub=subMap[sess.stuId];
         if(existingSub){setAnswers(existingSub.answers||{});}
@@ -385,7 +411,6 @@ function App(){
     })();
   },[]);
 
-  /* ★ 세션 저장 — 학생이 활동 중 curQ 변경될 때마다 */
   useEffect(()=>{
     if(page==="worksheet"&&stuId&&stuName){
       LC.set("stu_session",{stuId,stuName,curQ,savedAt:Date.now()});
@@ -394,21 +419,20 @@ function App(){
 
   useEffect(()=>{setSetkExtras(prev=>questions.map((_,i)=>prev[i]||mkAct()));},[questions.length]);
   useEffect(()=>{if(!loading)LC.set("lc_questions",questions);},[questions]);
-  useEffect(()=>{if(!loading)LC.set("lc_submissions",submissions);},[submissions]);
 
-  /* 교사: 15초 submissions 폴링 */
+  /* ★ A안: 교사 폴링 — 사진 제외 경량 데이터만 (15초) */
   useEffect(()=>{
     if(!dbEnabled||loading||page!=="teacher")return;
-    const iv=setInterval(async()=>{try{const d=await FB.load(dbUrl);if(d.submissions)applySubmissions(d.submissions);}catch{}},15000);
+    const iv=setInterval(async()=>{try{const d=await FB.loadLight(dbUrl);if(d.submissions)mergeLightSubmissions(d.submissions);}catch{}},15000);
     return()=>clearInterval(iv);
   },[dbEnabled,dbUrl,loading,page]);
 
-  /* 학생: 8초마다 questions + 반려 폴링 */
+  /* 학생 폴링 — 문항 + 반려 (8초) */
   useEffect(()=>{
     if(!dbEnabled||loading||page!=="worksheet"||!stuId)return;
     const iv=setInterval(async()=>{
       try{
-        const d=await FB.load(dbUrl);
+        const d=await FB.loadLight(dbUrl);
         if(d.questions&&Array.isArray(d.questions)&&d.questions.length>0){
           const inc=JSON.stringify(d.questions.map(q=>({id:q.id,title:q.title,question:q.question,maxLen:q.maxLen})));
           const cur=JSON.stringify(questions.map(q=>({id:q.id,title:q.title,question:q.question,maxLen:q.maxLen})));
@@ -438,7 +462,7 @@ function App(){
   const pushToServer=useCallback(async(patch={})=>{
     const data={...snapshot(),...patch};
     if(data.questions)data.questions=await prepareQForSave(data.questions);
-    const lcMap={roster:"lc_roster",questions:"lc_questions",submissions:"lc_submissions",att:"lc_att",attNote:"lc_attNote",setkStore:"lc_setkStore",teacher1:"lc_teacher1",teacher2:"lc_teacher2",globalPrompts:"lc_globalPrompts",apiKeys:"lc_apiKeys",aiEngine:"lc_aiEngine",driveUrls:"lc_driveUrls",rootUrl:"lc_rootUrl",korComp:"lc_korComp",mathComp:"lc_mathComp"};
+    const lcMap={roster:"lc_roster",questions:"lc_questions",att:"lc_att",attNote:"lc_attNote",setkStore:"lc_setkStore",teacher1:"lc_teacher1",teacher2:"lc_teacher2",globalPrompts:"lc_globalPrompts",apiKeys:"lc_apiKeys",aiEngine:"lc_aiEngine",driveUrls:"lc_driveUrls",rootUrl:"lc_rootUrl",korComp:"lc_korComp",mathComp:"lc_mathComp"};
     Object.entries(lcMap).forEach(([k,lk])=>{if(data[k]!==undefined)LC.set(lk,data[k]);});
     LC.set("lc_teacherPw",data.teacherPw||"1234");
     if(data.appsScriptUrl!=null)LC.set("apps_script_url",data.appsScriptUrl);
@@ -449,17 +473,42 @@ function App(){
   },[snapshot,dbEnabled,dbUrl]);
 
   const pushSubmission=useCallback(async(sid,subData)=>{
-    LC.set("lc_submissions",Object.values({...submissionsMap,[sid]:subData}));
     if(!dbEnabled)return true;
     try{await FB.patchSubmission(dbUrl,sid,subData);return true;}
     catch(e){console.error("제출 저장 실패:",e.message);return false;}
-  },[submissionsMap,dbEnabled,dbUrl]);
+  },[dbEnabled,dbUrl]);
 
   const syncFromServer=async()=>{
     if(!dbEnabled){alert("Firebase URL을 먼저 입력하세요.");return;}
     setDbStatus("syncing");setSyncMsg("불러오는 중...");
     try{const d=await FB.load(dbUrl);applyData(d);setDbStatus("ok");setSyncMsg("✓ 동기화 완료");setTimeout(()=>setSyncMsg(""),3000);}
     catch(e){setDbStatus("error");setSyncMsg("⚠ "+e.message);setTimeout(()=>setSyncMsg(""),5000);}
+  };
+
+  /* ★ A안: 사진보기 — 클릭 시 그 학생 사진만 Firebase에서 한 번 불러옴 */
+  const openPhotos=async(sid,qid,qTitle,stuName)=>{
+    setPhotoModal({loading:true,imgs:[],stuName,qTitle});
+    // 이미 메모리에 사진이 있으면 바로 사용
+    const cached=submissionsMap[sid]?.answers?.[qid];
+    const buildImgs=ans=>{
+      const imgs=[];
+      if(ans.mainPhoto)imgs.push({label:"답변사진",src:ans.mainPhoto});
+      if(ans.questionPhoto)imgs.push({label:"문항전체",src:ans.questionPhoto});
+      Object.entries(ans.subImgs||{}).forEach(([si,src])=>{if(src)imgs.push({label:`추가${Number(si)+1}`,src});});
+      return imgs;
+    };
+    if(cached&&(cached.mainPhoto||cached.questionPhoto||(cached.subImgs&&Object.values(cached.subImgs).some(v=>v)))){
+      setPhotoModal({loading:false,imgs:buildImgs(cached),stuName,qTitle});return;
+    }
+    if(!dbEnabled){setPhotoModal({loading:false,imgs:[],stuName,qTitle,err:"서버 미연결"});return;}
+    try{
+      const sub=await FB.loadStudentPhotos(dbUrl,sid);
+      const ans=sub?.answers?.[qid]||{};
+      const imgs=buildImgs(ans);
+      // 가져온 사진을 메모리에 보존 (다음 클릭 시 재요청 방지)
+      setSubmissionsMap(prev=>{const n={...prev};if(n[sid]){n[sid]={...n[sid],answers:{...n[sid].answers,[qid]:{...n[sid].answers[qid],...ans}}};}return n;});
+      setPhotoModal({loading:false,imgs,stuName,qTitle});
+    }catch(e){setPhotoModal({loading:false,imgs:[],stuName,qTitle,err:e.message});}
   };
 
   const isFloatTab=!FIXED_TABS.has(tab);
@@ -615,8 +664,8 @@ function App(){
     setOcrLoading(p=>({...p,[ok]:false}));
   };
 
-  const exportAttCsv=()=>{const hdr=["연번","학번","이름",...PERIODS.map(p=>p+"교시"),"비고"];const rows=roster.map(s=>[s.no,s.id,s.name,...PERIODS.map(p=>(att[s.id]||{})[p]==="/"?"결석":"출석"),attNote[s.id]||""]);const csv="﻿"+[["출석현황"],hdr,...rows].map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="출석현황.csv";a.click();};
-  const exportSetkCsv=()=>{const hdr=["연번","학번","이름",...questions.map((_,i)=>`활동${i+1}`),"최종"];const rows=roster.map(s=>{const st=setkStore[s.id]||{};return[s.no,s.id,s.name,...questions.map(q=>st[q.id]||""),st.final||""];});const csv="﻿"+[["학생별 세특"],hdr,...rows].map(r=>r.map(v=>'"'+String(v||"").replace(/"/g,'""')+'"').join(",")).join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="학생별세특.csv";a.click();};
+  const exportAttCsv=()=>{const hdr=["연번","학번","이름",...PERIODS.map(p=>p+"교시"),"비고"];const rows=roster.map(s=>[s.no,s.id,s.name,...PERIODS.map(p=>(att[s.id]||{})[p]==="/"?"결석":"출석"),attNote[s.id]||""]);const csv="\ufeff"+[["출석현황"],hdr,...rows].map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="출석현황.csv";a.click();};
+  const exportSetkCsv=()=>{const hdr=["연번","학번","이름",...questions.map((_,i)=>`활동${i+1}`),"최종"];const rows=roster.map(s=>{const st=setkStore[s.id]||{};return[s.no,s.id,s.name,...questions.map(q=>st[q.id]||""),st.final||""];});const csv="\ufeff"+[["학생별 세특"],hdr,...rows].map(r=>r.map(v=>'"'+String(v||"").replace(/"/g,'""')+'"').join(",")).join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download="학생별세특.csv";a.click();};
 
   const reset=()=>{
     LC.remove("stu_session");
@@ -629,6 +678,27 @@ function App(){
   const TBtn=()=>(page!=="worksheet"&&page!=="review"&&page!=="result"?<button onClick={()=>{setPwInput("");setPage("pw");}} style={{...btn(`linear-gradient(135deg,${cv.lavMd},#b8a4f0)`,cv.ink),borderRadius:20,fontSize:".75rem",padding:".35rem 1rem"}}>🏫 교사 모드</button>:null);
   const Spinner=({prog})=>(<div style={{position:"fixed",inset:0,background:"rgba(45,40,64,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}><div style={{...crd(),maxWidth:300,width:"88%",textAlign:"center",padding:"2rem"}}><div style={{width:42,height:42,border:`3px solid ${cv.border}`,borderTopColor:cv.lav,borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 1rem"}}/><div style={{fontWeight:700,color:cv.ink,marginBottom:".5rem"}}>교세특 생성 중...</div>{prog!=null&&<div style={{height:5,background:cv.border,borderRadius:999,overflow:"hidden"}}><div style={{height:"100%",width:prog+"%",background:`linear-gradient(90deg,${cv.lavMd},${cv.mintMd})`,transition:"width .3s"}}/></div>}</div></div>);
 
+  /* ★ A안: 사진보기 모달 */
+  const PhotoModal=()=>{
+    if(!photoModal)return null;
+    return(<div style={{position:"fixed",inset:0,background:"rgba(26,26,46,.85)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}} onClick={e=>{if(e.target===e.currentTarget)setPhotoModal(null);}}>
+      <div style={{background:"#1a1a2e",borderRadius:14,maxWidth:760,width:"100%",maxHeight:"90vh",overflowY:"auto",padding:"1.4rem"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"1rem"}}>
+          <div style={{color:"#fff",fontWeight:800,fontSize:".95rem"}}>📷 {photoModal.stuName} — {photoModal.qTitle}</div>
+          <button onClick={()=>setPhotoModal(null)} style={{...btn("rgba(255,255,255,.15)"),border:"1px solid rgba(255,255,255,.3)",fontSize:".8rem",padding:".3rem .8rem"}}>✕ 닫기</button>
+        </div>
+        {photoModal.loading
+          ?<div style={{textAlign:"center",padding:"3rem"}}><div style={{width:38,height:38,border:"3px solid rgba(255,255,255,.2)",borderTopColor:"#c5b8f5",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 1rem"}}/><div style={{color:"#c5b8f5"}}>사진 불러오는 중...</div></div>
+          :photoModal.err
+            ?<div style={{color:"#f5b8c8",textAlign:"center",padding:"2rem"}}>⚠ {photoModal.err}</div>
+            :photoModal.imgs.length===0
+              ?<div style={{color:"#8882a8",textAlign:"center",padding:"2rem"}}>첨부된 사진이 없습니다.</div>
+              :photoModal.imgs.map((im,i)=>(<div key={i} style={{marginBottom:"1.5rem"}}><div style={{color:"#c5b8f5",fontWeight:700,marginBottom:".4rem"}}>{im.label}</div><img src={im.src} alt="" style={{maxWidth:"100%",borderRadius:8,display:"block"}}/></div>))
+        }
+      </div>
+    </div>);
+  };
+
   if(loading)return<FullSpinner msg="데이터 불러오는 중..."/>;
 
   /* ════ LOGIN ════ */
@@ -640,7 +710,7 @@ function App(){
       <div className="login-grid" style={{flex:1,display:"flex",flexDirection:"row"}}>
         <div className="login-hero" style={{flex:1,background:"linear-gradient(160deg,#d8cfff,#c5e8ff,#d4f5e8)",padding:"2.5rem 2rem",display:"flex",flexDirection:"column",justifyContent:"space-between"}}>
           <div>
-            <div style={{...pill("rgba(255,255,255,.75)",cv.lav,"rgba(124,92,191,.3)"),marginBottom:"1.1rem",fontSize:".7rem",letterSpacing:".1em"}}>고등학교 교과 융합수업 V6</div>
+            <div style={{...pill("rgba(255,255,255,.75)",cv.lav,"rgba(124,92,191,.3)"),marginBottom:"1.1rem",fontSize:".7rem",letterSpacing:".1em"}}>고등학교 교과 융합수업 V7</div>
             <h1 style={{fontWeight:900,fontSize:"2.1rem",lineHeight:1.2,marginBottom:".8rem",color:cv.ink}}>화법과 작문<br/><span style={{color:cv.lav}}>×</span> 확률과 통계</h1>
             <div style={{display:"flex",gap:".4rem",margin:".7rem 0 1rem",flexWrap:"wrap"}}>
               <span style={pill("#e8d5ff","#6b35c7","#c5a8f0")}>📖 화법과 작문</span>
@@ -695,14 +765,15 @@ function App(){
     const MENU=[{k:"home",icon:"🏠",label:"홈"},{k:"dashboard",icon:"👥",label:"학생현황"},{k:"submissions",icon:"📋",label:"제출현황",badge:submissions.length},{k:"questions",icon:"✏️",label:"문항설정"},{k:"setk",icon:"🧠",label:"활동 분석 및 세특"},{k:"setkdash",icon:"📊",label:"학생별 세특"},{k:"settings",icon:"⚙️",label:"환경설정"}];
     return(
       <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",background:cv.bg}}>
+        <PhotoModal/>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 1.2rem",height:52,background:`linear-gradient(90deg,${cv.lav},#9b59b6)`,color:"#fff",position:"sticky",top:0,zIndex:80,boxShadow:"0 3px 14px rgba(124,92,191,.25)"}}>
           <div style={{display:"flex",alignItems:"center",gap:".6rem"}}>
             <button onClick={()=>setSideOpen(v=>!v)} style={{background:"none",border:"none",cursor:"pointer",color:"#fff",fontSize:"1.25rem",lineHeight:1,padding:".2rem"}}>☰</button>
-            <span onClick={()=>setPage("login")} style={{fontWeight:800,cursor:"pointer",color:"#fff",fontSize:".96rem"}}>🏫 교사 페이지 V6</span>
+            <span onClick={()=>setPage("login")} style={{fontWeight:800,cursor:"pointer",color:"#fff",fontSize:".96rem"}}>🏫 교사 페이지 V7</span>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:".7rem"}}>
             {syncMsg&&<span style={{fontSize:".75rem",color:"rgba(255,255,255,.9)",fontWeight:700}}>{syncMsg}</span>}
-            {dbEnabled&&<span style={{fontSize:".68rem",color:"rgba(255,255,255,.7)"}}>🔄 15초 자동동기화</span>}
+            {dbEnabled&&<span style={{fontSize:".68rem",color:"rgba(255,255,255,.7)"}}>🔄 15초 자동동기화(경량)</span>}
             {dbEnabled&&<button onClick={syncFromServer} style={{...btn("rgba(255,255,255,.18)"),border:"1px solid rgba(255,255,255,.35)",borderRadius:20,padding:".28rem .85rem",fontSize:".75rem"}}>동기화</button>}
             <button onClick={()=>{setPage("login");setPwInput("");}} style={{...btn("rgba(255,255,255,.18)"),border:"1px solid rgba(255,255,255,.35)",borderRadius:20,padding:".28rem .85rem",fontSize:".76rem"}}>로그아웃</button>
           </div>
@@ -716,7 +787,7 @@ function App(){
               <div style={{fontWeight:800,fontSize:"1.25rem",marginBottom:"1.2rem",color:cv.ink}}>🏠 홈 대시보드</div>
               <div style={{...crd({background:dbEnabled?(dbStatus==="ok"?cv.mintLt:cv.roseLt):cv.peachLt,border:`1.5px solid ${dbEnabled?(dbStatus==="ok"?cv.mintMd:cv.roseMd):cv.peachMd}`}),marginBottom:"1.2rem"}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:".5rem"}}>
-                  <div><div style={{fontWeight:700,fontSize:".9rem",color:cv.ink,marginBottom:".2rem"}}>{dbEnabled?(dbStatus==="ok"?"✅ Firebase 연결됨":"⚠️ 연결 오류"):"⚠️ 서버 미연결"}</div><div style={{fontSize:".78rem",color:cv.muted}}>{dbEnabled?"학생 제출 실시간 반영":"환경설정 → Firebase URL 입력"}</div></div>
+                  <div><div style={{fontWeight:700,fontSize:".9rem",color:cv.ink,marginBottom:".2rem"}}>{dbEnabled?(dbStatus==="ok"?"✅ Firebase 연결됨":"⚠️ 연결 오류"):"⚠️ 서버 미연결"}</div><div style={{fontSize:".78rem",color:cv.muted}}>{dbEnabled?"학생 제출 실시간 반영 · 사진은 클릭 시 로딩":"환경설정 → Firebase URL 입력"}</div></div>
                   {dbEnabled?<button onClick={syncFromServer} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".8rem",padding:".4rem .9rem"}}>🔄 지금 동기화</button>:<button onClick={()=>setTab("settings")} style={{...btn(`linear-gradient(135deg,#c05c1a,#e67e22)`),fontSize:".8rem",padding:".4rem .9rem"}}>⚙️ 설정하기</button>}
                 </div>
               </div>
@@ -762,7 +833,8 @@ function App(){
                 </div>
               </div>
               <div style={{...crd({background:"#fffdf0",border:`1px solid ${cv.peachMd}`}),marginBottom:"1rem",fontSize:".8rem",color:cv.peachDk,lineHeight:1.75}}>
-                💡 <strong>폴더 연결:</strong> 구글 드라이브에서 학생 이름 폴더 열기 → 주소창 URL 복사 → 아래 표의 <strong>+ URL</strong> 클릭 후 붙여넣기
+                💡 <strong>폴더 연결:</strong> 구글 드라이브에서 학생 이름 폴더 열기 → 주소창 URL 복사 → 아래 표의 <strong>+ URL</strong> 클릭 후 붙여넣기<br/>
+                📷 <strong>사진보기:</strong> 평소엔 사진을 불러오지 않아 빠릅니다. <strong>버튼을 누른 순간에만</strong> 해당 학생 사진을 불러옵니다 (전송량 절약).
               </div>
               <div style={{display:"flex",gap:".4rem",flexWrap:"wrap",marginBottom:"1rem",alignItems:"center"}}>
                 {[["전체 "+roster.length+"명","#f0f4ff",cv.ink2,cv.border2],["✅ "+roster.filter(s=>getStatus(s)==="complete").length+"명 종합완료",cv.mintLt,cv.mint,cv.mintMd],["📝 "+roster.filter(s=>getStatus(s)==="ws").length+"명 제출중",cv.lavLt,cv.lav,cv.lavMd],["⚠ "+roster.filter(s=>getStatus(s)==="rejected").length+"명 반려있음","#fff4ec","#c05c1a","#ffcba4"],["❌ "+roster.filter(s=>getStatus(s)==="none").length+"명 미제출",cv.roseLt,cv.rose,cv.roseMd]].map(([l,bg,col,bc])=>(<span key={l} style={pill(bg,col,bc)}>{l}</span>))}
@@ -791,11 +863,11 @@ function App(){
                       {questions.map((q,qi)=>{
                         const actSt=getActStatus(s.id,q.id);const[abg,acol,abc]=actStatusStyle[actSt]||actStatusStyle["미제출"];
                         const ansData=sub?.answers?.[q.id];
-                        const hasPhotos=ansData&&(ansData.mainPhoto||ansData.questionPhoto||(ansData.subImgs&&Object.values(ansData.subImgs).some(v=>v)));
+                        const hasPhotos=ansData&&(ansData.mainPhoto||ansData.questionPhoto||(ansData.subImgs&&Object.values(ansData.subImgs).some(v=>v))||ansData._hasMain||ansData._hasQuestion||ansData._hasSub);
                         return(<td key={qi} style={{padding:".35rem .3rem",textAlign:"center",borderBottom:`1px solid ${cv.border}`}}>
                           <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:".2rem"}}>
                             <span style={pill(abg,acol,abc)}>{actStatusLabel[actSt]||"미"}</span>
-                            {hasPhotos&&<button onClick={()=>{const imgs=[];if(ansData.mainPhoto)imgs.push({label:"답변사진",src:ansData.mainPhoto});if(ansData.questionPhoto)imgs.push({label:"문항전체",src:ansData.questionPhoto});Object.entries(ansData.subImgs||{}).forEach(([si,src])=>{if(src)imgs.push({label:`추가${Number(si)+1}`,src});});const win=window.open("","_blank","width=700,height=600");win.document.write(`<html><body style="background:#1a1a2e;padding:1rem;font-family:sans-serif">${imgs.map(im=>`<div style="margin-bottom:1.5rem"><div style="color:#c5b8f5;font-weight:700;margin-bottom:.4rem">${im.label}</div><img src="${im.src}" style="max-width:100%;border-radius:8px;display:block"/></div>`).join("")}</body></html>`);}} style={{...btn(cv.lavLt,cv.lav),border:`1px solid ${cv.lavMd}`,fontSize:".62rem",padding:".12rem .45rem",borderRadius:5}}>📷 사진보기</button>}
+                            {hasPhotos&&<button onClick={()=>openPhotos(s.id,q.id,q.title,s.name)} style={{...btn(cv.lavLt,cv.lav),border:`1px solid ${cv.lavMd}`,fontSize:".62rem",padding:".12rem .45rem",borderRadius:5}}>📷 사진보기</button>}
                             {actSt==="제출완료"&&<button onClick={()=>rejectActivity(s.id,q.id)} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".62rem",padding:".1rem .4rem",borderRadius:5}}>반려</button>}
                             {actSt==="재제출대기"&&sub?.answers?.[q.id]?.rejectionNote&&<span style={{fontSize:".62rem",color:"#c05c1a",maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={sub.answers[q.id].rejectionNote}>{sub.answers[q.id].rejectionNote.slice(0,8)}…</span>}
                           </div>
@@ -846,7 +918,7 @@ function App(){
                       <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem"}}>🎬 학습 영상 URL</div><div style={{display:"flex",gap:".4rem"}}><input style={{...inp(),flex:1}} placeholder="https://youtube.com/..." value={q.videoUrl} onChange={e=>upd(idx,{videoUrl:e.target.value})}/>{q.videoUrl&&<button onClick={()=>upd(idx,{videoUrl:""})} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".76rem",padding:".5rem .7rem",flexShrink:0}}>✕</button>}</div></div>
                       <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".35rem"}}>② 지문/시 이미지 (최대 3개)</div><PoemImageManager images={q.poemImages} onChange={imgs=>upd(idx,{poemImages:imgs})}/></div>
                       <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem"}}>③ 문항 내용</div><textarea style={{...inp(),minHeight:80,resize:"vertical",lineHeight:1.75}} value={q.question} onChange={e=>upd(idx,{question:e.target.value})}/></div>
-                      <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".45rem"}}>④ 추가 문항 ({q.subQuestions.length}개)</div><div style={{display:"flex",flexDirection:"column",gap:".4rem",marginBottom:".45rem"}}>{q.subQuestions.map((sub,si)=>(<div key={si} style={{display:"flex",gap:".35rem",alignItems:"center"}}><span style={{fontSize:".8rem",color:cv.muted,minWidth:20,fontWeight:700,flexShrink:0}}>{si+1})</span><input style={{...inp(),flex:1}} value={sub||""} onChange={e=>{const s=[...q.subQuestions];s[si]=e.target.value;upd(idx,{subQuestions:s});}}/><button onClick={()=>upd(idx,{subQuestions:q.subQuestions.filter((_,i)=>i!==si)})} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".74rem",padding:".45rem .65rem",flexShrink:0}}>✕</button></div>))}</div><button onClick={()=>upd(idx,{subQuestions:[...q.subQuestions,""]})} style={{...btn(cv.mintLt,cv.mint),border:`1px dashed ${cv.mintMd}`,fontSize:".78rem",padding:".35rem .8rem"}}>+ 추가문항</button></div>
+                      <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".45rem"}}>④ 추가 문항 ({q.subQuestions.length}개)</div><div style={{display:"flex",flexDirection:"column",gap:".4rem",marginBottom:".45rem"}}>{q.subQuestions.map((sub,si)=>(<div key={si} style={{display:"flex",gap:".35rem",alignItems:"center"}}><span style={{fontSize:".8rem",color:cv.muted,minWidth:20,fontWeight:700,flexShrink:0}}>{si+1})</span><input style={{...inp(),flex:1}} value={sub||""} onChange={e=>{const sx=[...q.subQuestions];sx[si]=e.target.value;upd(idx,{subQuestions:sx});}}/><button onClick={()=>upd(idx,{subQuestions:q.subQuestions.filter((_,i)=>i!==si)})} style={{...btn(cv.roseLt,cv.rose),border:`1px solid ${cv.roseMd}`,fontSize:".74rem",padding:".45rem .65rem",flexShrink:0}}>✕</button></div>))}</div><button onClick={()=>upd(idx,{subQuestions:[...q.subQuestions,""]})} style={{...btn(cv.mintLt,cv.mint),border:`1px dashed ${cv.mintMd}`,fontSize:".78rem",padding:".35rem .8rem"}}>+ 추가문항</button></div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:".7rem"}}>
                         <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem"}}>문항 제목</div><input style={inp()} value={q.title} onChange={e=>upd(idx,{title:e.target.value})}/></div>
                         <div><div style={{fontSize:".76rem",fontWeight:700,color:cv.ink2,marginBottom:".25rem"}}>최대 글자수</div><input style={inp()} type="number" min={50} max={3000} value={q.maxLen} onChange={e=>upd(idx,{maxLen:parseInt(e.target.value)||500})}/></div>
@@ -937,7 +1009,7 @@ function App(){
               </div>
               <div style={{...crd({background:appsScriptUrl?"#edfff6":cv.peachLt,border:`2px solid ${appsScriptUrl?cv.mintMd:cv.peachMd}`}),marginBottom:"1.2rem"}}>
                 <div style={{display:"flex",alignItems:"center",gap:".55rem",marginBottom:".55rem"}}><span style={{fontWeight:800,fontSize:"1rem",color:cv.ink}}>📸 구글 드라이브 사진 자동 업로드</span><span style={{...pill(appsScriptUrl?cv.mintLt:cv.peachLt,appsScriptUrl?cv.mint:cv.peachDk,appsScriptUrl?cv.mintMd:cv.peachMd),fontSize:".7rem"}}>{appsScriptUrl?"✅ 연결됨":"미설정"}</span></div>
-                <div style={{fontSize:".83rem",lineHeight:1.85,marginBottom:"1rem",background:"rgba(255,255,255,.85)",padding:".85rem 1rem",borderRadius:9}}>1. <a href="https://script.google.com" target="_blank" rel="noreferrer" style={{color:cv.lav,fontWeight:700}}>script.google.com</a> → 새 프로젝트<br/>2. Apps Script 코드 전체 붙여넣기<br/>3. <strong>배포 → 새 배포 → 웹 앱</strong> (실행: 나 / 액세스: 모든 사용자)<br/>4. 배포 URL → 아래 붙여넣기</div>
+                <div style={{fontSize:".83rem",lineHeight:1.85,marginBottom:"1rem",background:"rgba(255,255,255,.85)",padding:".85rem 1rem",borderRadius:9}}><strong>10장씩 올리시면 이 기능을 꼭 켜세요 — 사진 원본 영구 보관용.</strong><br/>1. <a href="https://script.google.com" target="_blank" rel="noreferrer" style={{color:cv.lav,fontWeight:700}}>script.google.com</a> → 새 프로젝트<br/>2. Apps Script 코드 전체 붙여넣기<br/>3. <strong>배포 → 새 배포 → 웹 앱</strong> (실행: 나 / 액세스: 모든 사용자)<br/>4. 배포 URL → 아래 붙여넣기</div>
                 <div style={{marginBottom:".85rem"}}><div style={{fontSize:".8rem",fontWeight:700,color:cv.ink2,marginBottom:".3rem"}}>Apps Script 웹앱 URL</div><input style={{...inp(),fontFamily:"monospace",fontSize:".83rem"}} placeholder="https://script.google.com/macros/s/.../exec" value={appsScriptUrl} onChange={e=>{const v=e.target.value.trim();setAppsScriptUrl(v);LC.set("apps_script_url",v);}}/></div>
                 <button onClick={async()=>{await pushToServer({appsScriptUrl});alert("✅ 저장 완료");}} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),fontSize:".84rem",padding:".5rem 1.1rem"}}>💾 저장</button>
               </div>
@@ -951,7 +1023,7 @@ function App(){
                   <button onClick={syncFromServer} disabled={!dbEnabled} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".84rem",padding:".5rem 1.1rem",opacity:dbEnabled?1:.5}}>🔄 서버에서 불러오기</button>
                   <button onClick={async()=>{if(!dbEnabled||!window.confirm("저장할까요?"))return;await pushToServer();alert("✅ 저장 완료");}} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,fontSize:".84rem",padding:".5rem 1.1rem"}}>💾 서버에 저장하기</button>
                 </div>
-                {dbEnabled&&dbStatus==="ok"&&<div style={{marginTop:".6rem",fontSize:".76rem",color:cv.mint,fontWeight:700}}>✅ Firebase 연결됨 — 15초마다 자동 동기화</div>}
+                {dbEnabled&&dbStatus==="ok"&&<div style={{marginTop:".6rem",fontSize:".76rem",color:cv.mint,fontWeight:700}}>✅ Firebase 연결됨 — 폴링은 사진 제외(경량), 사진은 클릭 시 로딩</div>}
               </div>
               <div style={{...crd(),marginBottom:".9rem"}}>
                 <div style={{fontWeight:700,marginBottom:".9rem",fontSize:".97rem"}}>👨‍🏫 교사 프로필</div>
@@ -1007,7 +1079,6 @@ function App(){
       <div style={{background:cv.bg,minHeight:"100vh"}} onClick={resetLogoutTimer} onTouchStart={resetLogoutTimer}>
         {generating&&<Spinner prog={genProg}/>}
 
-        {/* ★ 자동 로그아웃 경고 */}
         {logoutWarn&&(<div style={{position:"fixed",top:0,left:0,right:0,zIndex:200,background:"#c05c1a",color:"#fff",padding:".7rem 1rem",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"1rem"}}>
           <span style={{fontWeight:700,fontSize:".88rem"}}>⏱ 1분간 활동이 없어 10초 후 자동 로그아웃됩니다</span>
           <button onClick={resetLogoutTimer} style={{...btn("rgba(255,255,255,.25)"),border:"1px solid rgba(255,255,255,.5)",fontSize:".82rem",padding:".3rem .8rem",flexShrink:0}}>계속하기</button>
@@ -1100,89 +1171,4 @@ function App(){
                   if(!sq)return null;
                   const subKey=`${qid}_${si}`;const subImg=(ans.subImgs||{})[si]||null;const subTxt=(ans.subImgTexts||{})[si]||"";
                   return(<div key={si} style={{background:"#f8f4ff",border:`1.5px solid ${cv.lavMd}`,borderRadius:10,padding:".8rem .95rem"}}>
-                    <div style={{fontWeight:800,fontSize:".84rem",color:cv.lav,marginBottom:".3rem"}}>{si+1}) {sq}</div>
-                    <ImgUpload value={subImg} onChange={v=>setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgs:{...((p[qid]||{}).subImgs||{}),[si]:v}}}))} label="📷 수기 답변 사진"/>
-                    {subImg&&(<div style={{marginTop:".6rem"}}>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:".3rem"}}><span style={{fontSize:".77rem",fontWeight:700,color:cv.ink2}}>OCR 결과</span><button onClick={()=>runOCR(curQ,subImg,si)} disabled={!!ocrLoading[subKey]} style={{...btn(`linear-gradient(135deg,${cv.lav},#9b59b6)`),fontSize:".74rem",padding:".28rem .75rem",opacity:ocrLoading[subKey]?.6:1}}>{ocrLoading[subKey]?"⏳":"🔍 AI 읽기"}</button></div>
-                      <textarea style={{...inp(),minHeight:68,resize:"vertical",lineHeight:1.8,background:"#fafcff"}} value={subTxt} onChange={e=>setAnswers(p=>({...p,[qid]:{...(p[qid]||{}),subImgTexts:{...((p[qid]||{}).subImgTexts||{}),[si]:e.target.value}}}))} placeholder="OCR 결과 또는 직접 입력..."/>
-                    </div>)}
-                  </div>);
-                })}
-              </div>
-            </>)}
-
-            <div style={{background:cv.mintLt,border:`1.5px solid ${cv.mintMd}`,borderRadius:10,padding:".85rem .95rem",marginBottom:"1rem"}}>
-              <div style={{display:"flex",alignItems:"center",gap:".45rem",marginBottom:".5rem"}}><span style={pill(cv.mintLt,cv.mint,cv.mintMd)}>3단계</span><span style={{fontWeight:800,fontSize:".88rem",color:cv.mint}}>이 문항 페이지 전체 사진</span></div>
-              <div style={{fontSize:".8rem",color:cv.ink2,marginBottom:".65rem",lineHeight:1.6}}>현재 문항이 작성된 <strong>이 페이지 전체</strong>를 촬영하여 업로드해주세요.</div>
-              <ImgUpload value={ans.questionPhoto||null} onChange={v=>updAns("questionPhoto",v)} label="📷 이 문항 페이지 사진"/>
-              {ans.questionPhoto&&<div style={{marginTop:".45rem",fontSize:".77rem",color:cv.mint,fontWeight:700}}>✅ 사진 첨부 완료</div>}
-            </div>
-
-            {isRejected&&(<div style={{background:"#fff4ec",border:`2px solid #ffcba4`,borderRadius:10,padding:".85rem 1rem",marginBottom:"1rem"}}><div style={{fontWeight:800,fontSize:".88rem",color:"#c05c1a",marginBottom:".35rem",animation:"pulse 1.5s ease infinite"}}>⚠ 교사 반려 피드백</div>{ans.rejectionNote&&<div style={{fontSize:".85rem",color:cv.ink2,lineHeight:1.7,marginBottom:".5rem",background:"rgba(255,255,255,.8)",padding:".5rem .75rem",borderRadius:7}}>{ans.rejectionNote}</div>}<div style={{fontSize:".8rem",color:"#c05c1a"}}>답변과 사진을 수정한 후 다시 제출해주세요.</div></div>)}
-            {submitErr[qid]&&(<div style={{background:cv.roseLt,border:`1.5px solid ${cv.roseMd}`,borderRadius:9,padding:".65rem 1rem",marginBottom:".8rem",fontSize:".82rem",color:cv.rose,fontWeight:700}}>{submitErr[qid]}</div>)}
-            {uploadSt==="uploading"&&(<div style={{background:"#e8f4fd",border:`1.5px solid ${cv.skyMd}`,borderRadius:9,padding:".55rem 1rem",marginBottom:".8rem",display:"flex",alignItems:"center",gap:".55rem"}}><div style={{width:14,height:14,border:`2px solid ${cv.skyMd}`,borderTopColor:"#1a7ab0",borderRadius:"50%",animation:"spin 1s linear infinite",flexShrink:0}}/><span style={{fontSize:".82rem",color:"#1a5f8a",fontWeight:700}}>📤 드라이브 업로드 중...</span></div>)}
-            {uploadSt==="done"&&(<div style={{background:"#e6f9f2",border:`1.5px solid ${cv.mintMd}`,borderRadius:9,padding:".5rem 1rem",marginBottom:".8rem",fontSize:".82rem",color:cv.mint,fontWeight:700}}>✅ 드라이브 업로드 완료</div>)}
-
-            {isSubmitted
-              ?(<div style={{background:cv.mintLt,border:`1.5px solid ${cv.mintMd}`,borderRadius:10,padding:".75rem 1rem",display:"flex",alignItems:"center",justifyContent:"space-between"}}><div><div style={{fontWeight:800,fontSize:".88rem",color:cv.mint}}>✅ 활동 제출 완료</div><div style={{fontSize:".75rem",color:cv.muted,marginTop:".15rem"}}>{ans.submittedAt}</div></div><span style={pill(cv.mintLt,cv.mint,cv.mintMd)}>제출됨</span></div>)
-              :(<button onClick={()=>submitActivity(qid)} disabled={!!submitting[qid]} style={{...btn(`linear-gradient(135deg,${isRejected?"#c05c1a,#e67e22":cv.lav+",#9b59b6"})`),width:"100%",padding:".85rem",fontSize:".95rem",fontWeight:800,borderRadius:10,opacity:submitting[qid]?.6:1}}>{submitting[qid]?"⏳ 서버에 저장 중...":(isRejected?"↺ 다시 제출하기":"이 활동 제출하기 ✓")}</button>)
-            }
-          </div>
-
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:"1.1rem",borderTop:`1.5px solid ${cv.border}`}}>
-            <button disabled={curQ===0} onClick={()=>setCurQ(p=>p-1)} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem",opacity:curQ===0?.35:1}}>← 이전</button>
-            {!isLast?<button onClick={()=>setCurQ(p=>p+1)} style={{...btn("#fff",cv.ink2),border:`1.5px solid ${cv.border2}`,borderRadius:20,padding:".5rem 1.1rem"}}>다음 →</button>:<button onClick={()=>setCurQ(0)} style={{...btn(cv.lavLt,cv.lav),border:`1.5px solid ${cv.lavMd}`,borderRadius:20,padding:".5rem 1.1rem"}}>← 첫 문항으로</button>}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  /* ════ REVIEW ════ */
-  if(page==="review"&&submitted)return(
-    <div style={{background:cv.bg,minHeight:"100vh"}}>{generating&&<Spinner prog={genProg}/>}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 1rem",height:52,background:"#fff",borderBottom:`2px solid ${cv.border}`,position:"sticky",top:0,zIndex:80}}>
-        <span onClick={reset} style={{fontWeight:800,fontSize:".95rem",cursor:"pointer",color:cv.ink}}>화법과 작문 × 확률과 통계</span>
-        <span style={{fontSize:".76rem",color:cv.muted}}>{submitted.stuName}</span>
-      </div>
-      <div style={{maxWidth:780,margin:"0 auto",padding:"1.4rem 1rem 4rem"}}>
-        <div style={{textAlign:"center",marginBottom:"1.6rem"}}><h1 style={{fontWeight:800,fontSize:"1.45rem",color:cv.ink,marginBottom:".3rem"}}>활동지 제출 완료 🎉</h1></div>
-        <div style={{display:"flex",flexDirection:"column",gap:".85rem",marginBottom:"1.4rem"}}>{questions.map(q=>{const a=submitted.answers[q.id]||{};return(<div key={q.id} style={crd()}><div style={{background:`linear-gradient(90deg,${cv.lavMd},${cv.mintMd})`,padding:".58rem 1rem",margin:"-1.2rem -1.2rem .9rem",display:"flex",justifyContent:"space-between",borderRadius:"11px 11px 0 0"}}><strong style={{fontSize:".9rem",color:cv.ink}}>{q.title}</strong><span style={{fontSize:".74rem",color:cv.ink2}}>{q.subject}</span></div><div style={{fontSize:".88rem",lineHeight:1.85,whiteSpace:"pre-wrap",color:cv.ink2}}>{buildFullAnswer(a,q)}</div></div>);})}</div>
-        <div style={{...crd(),marginBottom:"1.3rem"}}><div style={{fontWeight:700,fontSize:".92rem",color:cv.ink2,marginBottom:".6rem"}}>📝 교사 추가 관찰</div><textarea style={{...inp(),height:78,resize:"vertical",background:"#fafcff",lineHeight:1.75}} value={tNote} onChange={e=>setTNote(e.target.value)} placeholder="수업 중 관찰 사항..."/></div>
-        <button onClick={generate} disabled={generating} style={{...btn(`linear-gradient(135deg,${cv.lav},${cv.mint})`),width:"100%",padding:".9rem",fontSize:".97rem",borderRadius:10,opacity:generating?.6:1}}>✦ AI 교세특 자동 생성하기 ✦</button>
-      </div>
-    </div>
-  );
-
-  /* ════ RESULT ════ */
-  if(page==="result"&&seteuk&&submitted)return(
-    <div style={{background:cv.bg,minHeight:"100vh"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 1rem",height:52,background:"#fff",borderBottom:`2px solid ${cv.border}`,position:"sticky",top:0,zIndex:80}}>
-        <span onClick={reset} style={{fontWeight:800,fontSize:".95rem",cursor:"pointer",color:cv.ink}}>화법과 작문 × 확률과 통계</span>
-      </div>
-      <div style={{maxWidth:680,margin:"0 auto",padding:"2rem 1rem 4rem"}}>
-        <div style={{textAlign:"center",marginBottom:"1.6rem"}}><h1 style={{fontWeight:800,fontSize:"1.45rem",color:cv.ink,marginBottom:".3rem"}}>교세특 생성 완료</h1></div>
-        <div style={{...crd({padding:"1.8rem 2rem"}),position:"relative",marginBottom:"1.3rem"}}>
-          <div style={{position:"absolute",top:-11,left:"1.2rem",background:cv.lavMd,padding:".08rem .55rem",fontSize:".68rem",fontWeight:700,color:cv.ink,borderRadius:18}}>세부능력 및 특기사항</div>
-          <p style={{fontSize:".92rem",lineHeight:2.05,color:cv.ink,whiteSpace:"pre-wrap",wordBreak:"keep-all"}}>{seteuk}</p>
-          <div style={{textAlign:"right",marginTop:".8rem",paddingTop:".7rem",borderTop:`1px solid ${cv.border}`,fontSize:".76rem",color:cv.muted}}>{seteuk.length}자</div>
-        </div>
-        <div style={{display:"flex",gap:".7rem",flexWrap:"wrap"}}>
-          <button onClick={()=>navigator.clipboard.writeText(seteuk).then(()=>alert("복사!")).catch(()=>{})} style={{...btn(`linear-gradient(135deg,${cv.mint},#27ae60)`),flex:1,padding:".75rem",minWidth:90}}>📋 복사</button>
-          <button onClick={()=>{setSeteuk(null);setPage("review");}} style={{...btn("#fff",cv.ink),border:`1.5px solid ${cv.border2}`,flex:1,padding:".75rem",minWidth:90}}>↺ 재생성</button>
-          <button onClick={reset} style={{...btn("#fff",cv.muted),border:`1px solid ${cv.border}`,flex:1,padding:".75rem",minWidth:90}}>처음으로</button>
-        </div>
-      </div>
-    </div>
-  );
-  return null;
-}
-function AG({value,onChange,placeholder,style={},minH=52}){
-  const r=useRef(null);
-  useEffect(()=>{if(r.current){r.current.style.height="auto";r.current.style.height=Math.max(r.current.scrollHeight,minH)+"px";}},[value]);
-  return <textarea ref={r} className="ag" value={value||""} onChange={onChange} placeholder={placeholder} style={{minHeight:minH,...style}}/>;
-}
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
-</script>
-</body>
-</html>
+                    <div style={{fontWeight:800,fontSize:".84rem",color:cv.lav,
